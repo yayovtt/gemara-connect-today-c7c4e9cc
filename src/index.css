@@ -1,0 +1,328 @@
+/* Hebrew fonts - must be at top */
+@import url('https://fonts.googleapis.com/css2?family=David+Libre:wght@400;500;700&family=Frank+Ruhl+Libre:wght@300;400;500;700&family=Heebo:wght@300;400;500;600;700&family=Rubik:wght@300;400;500;600;700&family=Noto+Serif+Hebrew:wght@300;400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Definition of the design system. All colors, gradients, fonts, etc should be defined here. 
+All colors MUST be HSL.
+*/
+
+@layer base {
+  /* Theme: Classic - לבן וזהב */
+  :root,
+  .theme-classic {
+    --background: 0 0% 100%;
+    --foreground: 215 50% 20%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 215 50% 20%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 215 50% 20%;
+
+    --primary: 215 50% 25%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 45 30% 95%;
+    --secondary-foreground: 215 50% 20%;
+
+    --muted: 45 20% 96%;
+    --muted-foreground: 215 30% 40%;
+
+    --accent: 43 90% 52%;
+    --accent-foreground: 215 50% 15%;
+
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 43 80% 55%;
+    --input: 45 30% 95%;
+    --ring: 43 90% 52%;
+
+    --radius: 0.5rem;
+    
+    --shadow-card: 0 1px 3px 0 hsl(43 80% 50% / 0.15);
+    --shadow-hover: 0 4px 12px -2px hsl(43 80% 50% / 0.25);
+
+    --sidebar-background: 0 0% 100%;
+    --sidebar-foreground: 215 50% 20%;
+    --sidebar-primary: 215 50% 25%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 45 40% 95%;
+    --sidebar-accent-foreground: 215 50% 20%;
+    --sidebar-border: 43 80% 55%;
+    --sidebar-ring: 43 90% 52%;
+  }
+
+  /* Theme: Midnight - חצות (כהה יוקרתי) */
+  .theme-midnight {
+    --background: 220 25% 8%;
+    --foreground: 42 40% 92%;
+
+    --card: 220 22% 12%;
+    --card-foreground: 42 40% 92%;
+
+    --popover: 220 22% 12%;
+    --popover-foreground: 42 40% 92%;
+
+    --primary: 43 85% 50%;
+    --primary-foreground: 220 25% 8%;
+
+    --secondary: 220 18% 18%;
+    --secondary-foreground: 42 40% 92%;
+
+    --muted: 220 18% 16%;
+    --muted-foreground: 220 10% 55%;
+
+    --accent: 43 85% 50%;
+    --accent-foreground: 220 25% 8%;
+
+    --destructive: 0 62.8% 45%;
+    --destructive-foreground: 210 40% 98%;
+
+    --border: 220 18% 20%;
+    --input: 220 18% 16%;
+    --ring: 43 85% 50%;
+    
+    --shadow-card: 0 1px 3px 0 hsl(0 0% 0% / 0.4);
+    --shadow-hover: 0 4px 12px -2px hsl(0 0% 0% / 0.5);
+
+    --sidebar-background: 220 25% 10%;
+    --sidebar-foreground: 42 40% 92%;
+    --sidebar-primary: 43 85% 50%;
+    --sidebar-primary-foreground: 220 25% 8%;
+    --sidebar-accent: 220 18% 16%;
+    --sidebar-accent-foreground: 42 40% 92%;
+    --sidebar-border: 220 18% 20%;
+    --sidebar-ring: 43 85% 50%;
+  }
+
+  /* Theme: Royal - מלכותי (כחול עמוק וכסף) */
+  .theme-royal {
+    --background: 225 35% 12%;
+    --foreground: 210 20% 92%;
+
+    --card: 225 30% 16%;
+    --card-foreground: 210 20% 92%;
+
+    --popover: 225 30% 16%;
+    --popover-foreground: 210 20% 92%;
+
+    --primary: 210 15% 75%;
+    --primary-foreground: 225 35% 12%;
+
+    --secondary: 225 25% 22%;
+    --secondary-foreground: 210 20% 92%;
+
+    --muted: 225 25% 20%;
+    --muted-foreground: 210 15% 55%;
+
+    --accent: 210 15% 80%;
+    --accent-foreground: 225 35% 12%;
+
+    --destructive: 0 62.8% 45%;
+    --destructive-foreground: 210 40% 98%;
+
+    --border: 225 20% 25%;
+    --input: 225 25% 20%;
+    --ring: 210 15% 75%;
+    
+    --shadow-card: 0 1px 3px 0 hsl(0 0% 0% / 0.4);
+    --shadow-hover: 0 4px 12px -2px hsl(0 0% 0% / 0.5);
+
+    --sidebar-background: 225 35% 14%;
+    --sidebar-foreground: 210 20% 92%;
+    --sidebar-primary: 210 15% 75%;
+    --sidebar-primary-foreground: 225 35% 12%;
+    --sidebar-accent: 225 25% 20%;
+    --sidebar-accent-foreground: 210 20% 92%;
+    --sidebar-border: 225 20% 25%;
+    --sidebar-ring: 210 15% 75%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  html {
+    direction: rtl;
+    overflow-x: hidden;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    direction: rtl;
+    text-align: right;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    overflow-x: hidden;
+    max-width: 100vw;
+  }
+
+  /* Prevent horizontal scroll on all containers */
+  #root, main, .app-container {
+    overflow-x: hidden;
+    max-width: 100vw;
+  }
+
+  /* RTL fixes for common elements */
+  input, textarea, select {
+    text-align: right;
+  }
+
+  /* Fix flex direction for RTL */
+  .flex-row-reverse-rtl {
+    @apply flex-row-reverse;
+  }
+
+  /* Ensure cards and containers respect RTL */
+  .card, [class*="Card"] {
+    text-align: right;
+  }
+
+  /* Fix icons in RTL context */
+  .rtl-flip {
+    transform: scaleX(-1);
+  }
+}
+
+/* Luxurious shadow utilities */
+@layer utilities {
+  .shadow-elegant {
+    box-shadow: 0 4px 20px -4px hsl(var(--primary) / 0.15);
+  }
+  
+  .shadow-gold {
+    box-shadow: 0 4px 20px -4px hsl(var(--accent) / 0.25);
+  }
+}
+
+/* Hebrew font classes */
+.font-david {
+  font-family: 'David Libre', serif;
+}
+
+.font-frank {
+  font-family: 'Frank Ruhl Libre', serif;
+}
+
+.font-heebo {
+  font-family: 'Heebo', sans-serif;
+}
+
+.font-rubik {
+  font-family: 'Rubik', sans-serif;
+}
+
+.font-noto-serif {
+  font-family: 'Noto Serif Hebrew', serif;
+}
+
+/* TipTap Rich Text Editor Styles */
+.ProseMirror {
+  outline: none;
+  min-height: 300px;
+  padding: 1rem;
+  direction: rtl;
+  text-align: right;
+}
+
+.ProseMirror p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  float: right;
+  color: hsl(var(--muted-foreground));
+  pointer-events: none;
+  height: 0;
+}
+
+.ProseMirror h1 {
+  font-size: 2em;
+  font-weight: bold;
+  margin-bottom: 0.5em;
+  margin-top: 0.5em;
+}
+
+.ProseMirror h2 {
+  font-size: 1.5em;
+  font-weight: bold;
+  margin-bottom: 0.5em;
+  margin-top: 0.5em;
+}
+
+.ProseMirror h3 {
+  font-size: 1.25em;
+  font-weight: bold;
+  margin-bottom: 0.5em;
+  margin-top: 0.5em;
+}
+
+.ProseMirror p {
+  margin-bottom: 0.75em;
+}
+
+.ProseMirror ul,
+.ProseMirror ol {
+  padding-right: 1.5em;
+  margin-bottom: 0.75em;
+}
+
+.ProseMirror ul {
+  list-style-type: disc;
+}
+
+.ProseMirror ol {
+  list-style-type: decimal;
+}
+
+.ProseMirror li {
+  margin-bottom: 0.25em;
+}
+
+.ProseMirror blockquote {
+  border-right: 4px solid hsl(var(--primary));
+  padding-right: 1em;
+  margin-right: 0;
+  margin-left: 0;
+  margin-bottom: 0.75em;
+  font-style: italic;
+  color: hsl(var(--muted-foreground));
+}
+
+.ProseMirror hr {
+  border: none;
+  border-top: 2px solid hsl(var(--border));
+  margin: 1.5em 0;
+}
+
+.ProseMirror code {
+  background-color: hsl(var(--muted));
+  border-radius: 0.25em;
+  padding: 0.2em 0.4em;
+  font-family: monospace;
+  font-size: 0.9em;
+}
+
+.ProseMirror a {
+  color: hsl(var(--primary));
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.ProseMirror a:hover {
+  opacity: 0.8;
+}
+
+.ProseMirror mark {
+  background-color: #fef08a;
+  padding: 0.1em 0.2em;
+  border-radius: 0.2em;
+}
+
+.theme-midnight .ProseMirror mark,
+.theme-royal .ProseMirror mark {
+  background-color: #854d0e;
+  color: #fef9c3;
+}

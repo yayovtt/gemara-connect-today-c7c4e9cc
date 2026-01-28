@@ -1,0 +1,436 @@
+import { useState, useEffect } from "react";
+import { Card, CardContent } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { Checkbox } from "@/components/ui/checkbox";
+import { supabase } from "@/integrations/supabase/client";
+import { FileText, Brain, Loader2, ChevronDown, ChevronUp, ExternalLink, Sparkles, Plus, Trash2 } from "lucide-react";
+import { useToast } from "@/hooks/use-toast";
+import PsakDinViewDialog from "./PsakDinViewDialog";
+import PsakDinEditDialog from "./PsakDinEditDialog";
+import PsakDinActions from "./PsakDinActions";
+
+interface LinkedPsakimSectionProps {
+  sugyaId: string;
+  masechet: string;
+  dafNumber: number;
+}
+
+interface LinkedPsak {
+  id: string;
+  title: string;
+  summary: string;
+  court: string;
+  year: number;
+  source_url?: string;
+  tags?: string[];
+  case_number?: string;
+  source_text?: string;
+  confidence?: string;
+  connection_explanation?: string;
+  relevance_score?: number;
+  source_type?: 'smart_index' | 'ai_analysis';
+}
+
+const LinkedPsakimSection = ({ sugyaId, masechet, dafNumber }: LinkedPsakimSectionProps) => {
+  const [psakim, setPsakim] = useState<LinkedPsak[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [expanded, setExpanded] = useState(false);
+  const [analyzingId, setAnalyzingId] = useState<string | null>(null);
+  const [selectedPsak, setSelectedPsak] = useState<any | null>(null);
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [editDialogOpen, setEditDialogOpen] = useState(false);
+  const [editingPsak, setEditingPsak] = useState<any | null>(null);
+  const [isNewPsak, setIsNewPsak] = useState(false);
+  const [selectedForBulk, setSelectedForBulk] = useState<Set<string>>(new Set());
+  const { toast } = useToast();
+
+  useEffect(() => {
+    loadLinkedPsakim();
+  }, [sugyaId, masechet, dafNumber]);
+
+  const loadLinkedPsakim = async () => {
+    setLoading(true);
+    try {
+      console.log('Loading linked psakim for:', { sugyaId, masechet, dafNumber });
+      
+      // 1. Get pattern_sugya_links - Smart Index links (by Hebrew masechet name)
+      const { data: patternLinks, error: patternError } = await supabase
+        .from('pattern_sugya_links')
+        .select(`
+          source_text,
+          confidence,
+          psakei_din:psak_din_id (id, title, summary, court, year, source_url, tags, case_number)
+        `)
+        .eq('masechet', masechet)
+        .eq('daf', dafNumber.toString());
+
+      if (patternError) console.error('Pattern links error:', patternError);
+      console.log('Pattern links by masechet/daf:', patternLinks?.length || 0);
+
+      // Also check by sugya_id pattern which includes the daf
+      const sugyaPatternA = sugyaId.endsWith('a') ? sugyaId : `${sugyaId.replace(/[ab]$/, '')}a`;
+      const sugyaPatternB = sugyaId.endsWith('b') ? sugyaId : `${sugyaId.replace(/[ab]$/, '')}b`;
+      
+      const { data: patternLinksBySugya, error: sugyaError } = await supabase
+        .from('pattern_sugya_links')
+        .select(`
+          source_text,
+          confidence,
+          psakei_din:psak_din_id (id, title, summary, court, year, source_url, tags, case_number)
+        `)
+        .or(`sugya_id.eq.${sugyaPatternA},sugya_id.eq.${sugyaPatternB}`);
+
+      if (sugyaError) console.error('Sugya links error:', sugyaError);
+      console.log('Pattern links by sugya_id:', patternLinksBySugya?.length || 0);
+
+      // 2. Get AI-based links (sugya_psak_links)
+      const { data: aiLinks } = await supabase
+        .from('sugya_psak_links')
+        .select(`
+          connection_explanation,
+          relevance_score,
+          psakei_din:psak_din_id (id, title, summary, court, year, source_url, tags, case_number)
+        `)
+        .eq('sugya_id', sugyaId);
+
+      // 3. Get psakim from smart_index_results that reference this masechet
+      const { data: smartIndexResults } = await supabase
+        .from('smart_index_results')
+        .select(`
+          psak_din_id,
+          masechtot,
+          sources,
+          topics,
+          psakei_din:psak_din_id (id, title, summary, court, year, source_url, tags, case_number)
+        `)
+        .contains('masechtot', [masechet]);
+
+      // Combine and deduplicate
+      const combined: LinkedPsak[] = [];
+      const seenIds = new Set<string>();
+
+      // Add pattern links by masechet/daf
+      patternLinks?.forEach((link: any) => {
+        if (link.psakei_din && !seenIds.has(link.psakei_din.id)) {
+          seenIds.add(link.psakei_din.id);
+          combined.push({
+            ...link.psakei_din,
+            source_text: link.source_text,
+            confidence: link.confidence,
+            source_type: 'smart_index'
+          });
+        }
+      });
+
+      // Add pattern links by sugya_id
+      patternLinksBySugya?.forEach((link: any) => {
+        if (link.psakei_din && !seenIds.has(link.psakei_din.id)) {
+          seenIds.add(link.psakei_din.id);
+          combined.push({
+            ...link.psakei_din,
+            source_text: link.source_text,
+            confidence: link.confidence,
+            source_type: 'smart_index'
+          });
+        }
+      });
+
+      // Add AI links
+      aiLinks?.forEach((link: any) => {
+        if (link.psakei_din && !seenIds.has(link.psakei_din.id)) {
+          seenIds.add(link.psakei_din.id);
+          combined.push({
+            ...link.psakei_din,
+            connection_explanation: link.connection_explanation,
+            relevance_score: link.relevance_score,
+            source_type: 'ai_analysis'
+          });
+        }
+      });
+
+      // Add smart index results
+      smartIndexResults?.forEach((result: any) => {
+        if (result.psakei_din && !seenIds.has(result.psakei_din.id)) {
+          seenIds.add(result.psakei_din.id);
+          // Extract relevant source for this masechet from sources array
+          const sources = result.sources as any[];
+          const relevantSource = sources?.find((s: any) => 
+            s.masechet === masechet || s.text?.includes(masechet)
+          );
+          combined.push({
+            ...result.psakei_din,
+            source_text: relevantSource?.text || `נמצא ב-${result.masechtot?.join(', ')}`,
+            confidence: 'medium',
+            source_type: 'smart_index'
+          });
+        }
+      });
+
+      setPsakim(combined);
+    } catch (error) {
+      console.error('Error loading linked psakim:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleAIAnalysis = async (psakId: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setAnalyzingId(psakId);
+    
+    try {
+      const { error } = await supabase.functions.invoke('analyze-psak-din', {
+        body: { psakId }
+      });
+
+      if (error) throw error;
+
+      toast({
+        title: "ניתוח AI הושלם",
+        description: "פסק הדין נותח והקישורים עודכנו",
+      });
+
+      // Reload to get updated links
+      await loadLinkedPsakim();
+    } catch (error) {
+      console.error('Error analyzing psak:', error);
+      toast({
+        title: "שגיאה בניתוח",
+        variant: "destructive",
+      });
+    } finally {
+      setAnalyzingId(null);
+    }
+  };
+
+  const handlePsakClick = async (psakId: string) => {
+    const { data } = await supabase
+      .from('psakei_din')
+      .select('*')
+      .eq('id', psakId)
+      .maybeSingle();
+    
+    if (data) {
+      setSelectedPsak(data);
+      setDialogOpen(true);
+    }
+  };
+
+  const handleEditPsak = async (psakId: string) => {
+    const { data } = await supabase
+      .from('psakei_din')
+      .select('*')
+      .eq('id', psakId)
+      .maybeSingle();
+    
+    if (data) {
+      setEditingPsak(data);
+      setIsNewPsak(false);
+      setEditDialogOpen(true);
+    }
+  };
+
+  const handleAddNew = () => {
+    setEditingPsak(null);
+    setIsNewPsak(true);
+    setEditDialogOpen(true);
+  };
+
+  const handleSaved = () => {
+    loadLinkedPsakim();
+  };
+
+  if (loading) {
+    return (
+      <Card className="border-accent/30">
+        <CardContent className="p-4 text-center">
+          <Loader2 className="w-5 h-5 animate-spin mx-auto text-muted-foreground" />
+        </CardContent>
+      </Card>
+    );
+  }
+
+  if (psakim.length === 0) {
+    return (
+      <Card className="border-accent/30 bg-accent/5" dir="rtl">
+        <CardContent className="p-4">
+          <div className="flex items-center justify-between mb-3 flex-row-reverse">
+            <h3 className="font-semibold text-foreground flex items-center gap-2 flex-row-reverse">
+              <FileText className="w-5 h-5 text-accent" />
+              פסקי דין מקושרים
+              <Badge variant="secondary" className="text-xs">
+                0
+              </Badge>
+            </h3>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={handleAddNew}
+              className="gap-1 h-7 px-2"
+            >
+              <Plus className="w-4 h-4" />
+              הוסף
+            </Button>
+          </div>
+          <p className="text-sm text-muted-foreground text-center py-4">
+            לא נמצאו פסקי דין מקושרים לדף זה. לחץ על "הוסף" להוסיף פסק דין או השתמש בחיפוש למטה.
+          </p>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  const displayedPsakim = expanded ? psakim : psakim.slice(0, 3);
+
+  return (
+    <>
+      <Card className="border-accent/30 bg-accent/5" dir="rtl">
+        <CardContent className="p-4">
+          <div className="flex items-center justify-between mb-3 flex-row-reverse">
+            <h3 className="font-semibold text-foreground flex items-center gap-2 flex-row-reverse">
+              <FileText className="w-5 h-5 text-accent" />
+              פסקי דין מקושרים
+              <Badge variant="secondary" className="text-xs">
+                {psakim.length}
+              </Badge>
+            </h3>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={handleAddNew}
+                className="gap-1 h-7 px-2"
+              >
+                <Plus className="w-4 h-4" />
+                הוסף
+              </Button>
+              {psakim.length > 3 && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setExpanded(!expanded)}
+                  className="gap-1 flex-row-reverse"
+                >
+                  {expanded ? (
+                    <>
+                      הסתר
+                      <ChevronUp className="w-4 h-4" />
+                    </>
+                  ) : (
+                    <>
+                      הצג הכל ({psakim.length})
+                      <ChevronDown className="w-4 h-4" />
+                    </>
+                  )}
+                </Button>
+              )}
+            </div>
+          </div>
+
+          <ScrollArea className={expanded ? "h-[300px]" : ""}>
+            <div className="space-y-2">
+              {displayedPsakim.map((psak) => (
+                <div
+                  key={psak.id}
+                  className="p-3 rounded-lg bg-card border border-border hover:shadow-md transition-shadow cursor-pointer group"
+                  onClick={() => handlePsakClick(psak.id)}
+                >
+                  <div className="flex items-start gap-3 flex-row-reverse">
+                    {/* Right side: Actions */}
+                    <div className="flex items-center gap-1 shrink-0">
+                      <PsakDinActions
+                        psakId={psak.id}
+                        onEdit={handleEditPsak}
+                        onDelete={handleSaved}
+                        compact
+                      />
+                      {psak.source_type === 'ai_analysis' && (
+                        <Badge 
+                          variant="default"
+                          className="text-xs bg-purple-500/20 text-purple-700 border-purple-300"
+                        >
+                          AI
+                        </Badge>
+                      )}
+                      {psak.source_type === 'smart_index' && (
+                        <Badge 
+                          variant="default"
+                          className="text-xs bg-blue-500/20 text-blue-700 border-blue-300"
+                        >
+                          אינדקס
+                        </Badge>
+                      )}
+                      {psak.confidence && (
+                        <Badge 
+                          variant={psak.confidence === 'high' ? 'default' : 'outline'}
+                          className="text-xs"
+                        >
+                          {psak.confidence === 'high' ? 'גבוה' : psak.confidence === 'medium' ? 'בינוני' : 'נמוך'}
+                        </Badge>
+                      )}
+                      
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        className="h-8 w-8 text-accent hover:bg-accent/20"
+                        onClick={(e) => handleAIAnalysis(psak.id, e)}
+                        disabled={analyzingId === psak.id}
+                        title="נתח עם AI"
+                      >
+                        {analyzingId === psak.id ? (
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                        ) : (
+                          <Sparkles className="w-4 h-4" />
+                        )}
+                      </Button>
+                      
+                      <ExternalLink className="w-4 h-4 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" />
+                    </div>
+                    
+                    {/* Left side: Content */}
+                    <div className="flex-1 text-right">
+                      <div className="font-medium line-clamp-1 group-hover:text-primary transition-colors text-right">
+                        {psak.title}
+                      </div>
+                      <div className="text-xs text-muted-foreground mt-1 text-right">
+                        {psak.court} • {psak.year}
+                      </div>
+                      {psak.source_text && (
+                        <div className="text-xs text-accent mt-1 line-clamp-1 text-right">
+                          מקור: {psak.source_text}
+                        </div>
+                      )}
+                      {psak.connection_explanation && (
+                        <div className="text-xs text-muted-foreground mt-1 line-clamp-1 text-right">
+                          {psak.connection_explanation}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </ScrollArea>
+        </CardContent>
+      </Card>
+
+      <PsakDinViewDialog
+        psak={selectedPsak}
+        open={dialogOpen}
+        onOpenChange={setDialogOpen}
+      />
+
+      <PsakDinEditDialog
+        psak={editingPsak}
+        open={editDialogOpen}
+        onOpenChange={setEditDialogOpen}
+        onSaved={handleSaved}
+        isNew={isNewPsak}
+      />
+    </>
+  );
+};
+
+export default LinkedPsakimSection;

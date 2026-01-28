@@ -1,0 +1,243 @@
+@import url('https://fonts.googleapis.com/css2?family=Heebo:wght@300;400;500;600;700;800&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Clean Navy & Gold Theme - White, Gold, Navy Blue Only */
+    --background: 0 0% 100%;
+    --foreground: 220 70% 22%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 220 70% 22%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 220 70% 22%;
+
+    --primary: 220 70% 22%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 43 95% 58%;
+    --secondary-foreground: 220 70% 22%;
+
+    --muted: 0 0% 96%;
+    --muted-foreground: 220 50% 45%;
+
+    --accent: 43 95% 58%;
+    --accent-foreground: 220 70% 22%;
+
+    --destructive: 220 70% 22%;
+    --destructive-foreground: 0 0% 100%;
+
+    --success: 220 70% 22%;
+    --success-foreground: 0 0% 100%;
+
+    --warning: 43 95% 58%;
+    --warning-foreground: 220 70% 22%;
+
+    --border: 43 95% 58%;
+    --input: 0 0% 100%;
+    --ring: 43 95% 58%;
+
+    --radius: 1rem;
+
+    /* Custom colors - Navy & Gold Only */
+    --navy: 220 70% 22%;
+    --navy-light: 220 60% 35%;
+    --gold: 43 95% 58%;
+    --gold-light: 43 90% 70%;
+    --gold-dark: 40 85% 48%;
+
+    --sidebar-background: 0 0% 100%;
+    --sidebar-foreground: 220 70% 22%;
+    --sidebar-primary: 220 70% 22%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 43 95% 58%;
+    --sidebar-accent-foreground: 220 70% 22%;
+    --sidebar-border: 43 95% 58%;
+    --sidebar-ring: 43 95% 58%;
+  }
+
+  .dark {
+    --background: 220 50% 8%;
+    --foreground: 45 20% 95%;
+
+    --card: 220 50% 12%;
+    --card-foreground: 45 20% 95%;
+
+    --popover: 220 50% 12%;
+    --popover-foreground: 45 20% 95%;
+
+    --primary: 45 90% 55%;
+    --primary-foreground: 220 60% 10%;
+
+    --secondary: 220 40% 18%;
+    --secondary-foreground: 45 20% 90%;
+
+    --muted: 220 40% 15%;
+    --muted-foreground: 220 15% 60%;
+
+    --accent: 45 80% 50%;
+    --accent-foreground: 220 60% 10%;
+
+    --destructive: 0 72% 55%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 220 40% 20%;
+    --input: 220 40% 20%;
+    --ring: 45 80% 50%;
+
+    --navy: 220 50% 30%;
+    --navy-light: 220 40% 40%;
+    --gold: 45 85% 55%;
+    --gold-light: 45 80% 65%;
+    --gold-dark: 40 75% 45%;
+
+    --sidebar-background: 240 5.9% 10%;
+    --sidebar-foreground: 240 4.8% 95.9%;
+    --sidebar-primary: 224.3 76.3% 48%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 240 3.7% 15.9%;
+    --sidebar-accent-foreground: 240 4.8% 95.9%;
+    --sidebar-border: 240 3.7% 15.9%;
+    --sidebar-ring: 217.2 91.2% 59.8%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  html {
+    font-family: 'Heebo', sans-serif;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    direction: rtl;
+  }
+}
+
+@layer utilities {
+  .text-gradient {
+    background: linear-gradient(135deg, hsl(var(--gold)) 0%, hsl(var(--gold-dark)) 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  .bg-navy {
+    background-color: hsl(var(--navy));
+  }
+
+  .bg-navy-light {
+    background-color: hsl(var(--navy-light));
+  }
+
+  .bg-gold {
+    background-color: hsl(var(--gold));
+  }
+
+  .bg-gold-light {
+    background-color: hsl(var(--gold-light));
+  }
+
+  .text-navy {
+    color: hsl(var(--navy));
+  }
+
+  .text-gold {
+    color: hsl(var(--gold));
+  }
+
+  .border-navy {
+    border-color: hsl(var(--navy));
+  }
+
+  .border-gold {
+    border-color: hsl(var(--gold));
+  }
+
+  .glass-effect {
+    @apply bg-white backdrop-blur-sm border-2 border-gold shadow-lg;
+  }
+
+  .highlight-match {
+    background-color: hsl(43 95% 70% / 0.9);
+    @apply rounded-md px-1.5 py-0.5 font-bold transition-all duration-300 shadow-sm;
+  }
+
+  .highlight-match-secondary {
+    background-color: hsl(220 70% 85% / 0.7);
+    @apply rounded-md px-1.5 py-0.5 font-semibold transition-all duration-300;
+  }
+
+  .highlight-match-tertiary {
+    background-color: hsl(43 90% 80% / 0.7);
+    @apply rounded-md px-1.5 py-0.5 font-semibold transition-all duration-300;
+  }
+
+  .touch-target {
+    @apply min-h-[44px] min-w-[44px];
+  }
+
+  .animate-fade-in {
+    animation: fadeIn 0.3s ease-out;
+  }
+
+  .animate-slide-up {
+    animation: slideUp 0.4s ease-out;
+  }
+
+  .animate-pulse-soft {
+    animation: pulseSoft 2s ease-in-out infinite;
+  }
+
+  .line-clamp-2 {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+}
+
+@keyframes floatBounce {
+  0%, 100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-8px);
+  }
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes pulseSoft {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.7;
+  }
+}
