@@ -486,6 +486,31 @@ function highlightText(text: string, query: string): string {
 // ========== Data Access Functions ==========
 
 /**
+ * Get ALL psakim from IndexedDB (for loading from local index)
+ */
+export async function getAllPsakimFromDB(): Promise<PsakDin[]> {
+  try {
+    const db = await openDB();
+    
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_PSAKIM, 'readonly');
+      const store = tx.objectStore(STORE_PSAKIM);
+      const request = store.getAll();
+      
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => {
+        const results = request.result || [];
+        console.log(`✅ Loaded ${results.length} psakim from IndexedDB`);
+        resolve(results as PsakDin[]);
+      };
+    });
+  } catch (error) {
+    console.error('Error getting all psakim from DB:', error);
+    return [];
+  }
+}
+
+/**
  * Get single psak from IndexedDB
  */
 export async function getPsakFromDB(id: string): Promise<PsakDin | null> {

@@ -83,6 +83,7 @@ import {
   getIndexMetadata,
   clearSearchIndex,
   isIndexValid,
+  getAllPsakimFromDB,
   type SearchIndex,
   type SearchResultWithContext,
 } from '@/services/indexedDBService';
@@ -270,12 +271,16 @@ const DEFAULT_SMART_OPTIONS: SmartSearchOptions = {
   wordBoundary: false,
 };
 
+// Data source options for loading psakim
+type DataSourceType = 'local' | 'cloud' | 'both';
+
 // localStorage keys for persisting settings
 const STORAGE_KEYS = {
   ADVANCED_SEARCH_OPTIONS: 'smartSearch_advancedOptions',
   SMART_OPTIONS: 'smartSearch_smartOptions',
   RESULTS_DISPLAY_MODE: 'smartSearch_resultsDisplayMode',
   USE_STREAMING_SEARCH: 'smartSearch_useStreamingSearch',
+  DATA_SOURCE: 'smartSearch_dataSource',
 };
 
 // Helper to load from localStorage with fallback
@@ -596,6 +601,12 @@ export function SmartSearchPage() {
   const [selectedPsakim, setSelectedPsakim] = useState<string[]>([]);
   const [psakimSearchTerm, setPsakimSearchTerm] = useState('');
   
+  // Data source selection - 'local' = IndexedDB, 'cloud' = Supabase, 'both' = merge
+  const [dataSource, setDataSource] = useState<DataSourceType>(() => {
+    const stored = localStorage.getItem(STORAGE_KEYS.DATA_SOURCE);
+    return (stored as DataSourceType) || 'local'; // Default to local if index exists
+  });
+  
   // Search scope - 'all' searches all psakim, 'selected' only selected, 'custom' only input text
   const [searchScope, setSearchScope] = useState<'all' | 'selected' | 'custom'>('all');
   const [includeInputText, setIncludeInputText] = useState(true);
@@ -718,6 +729,10 @@ export function SmartSearchPage() {
   useEffect(() => {
     saveToStorage(STORAGE_KEYS.USE_STREAMING_SEARCH, useStreamingSearch);
   }, [useStreamingSearch]);
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEYS.DATA_SOURCE, dataSource);
+  }, [dataSource]);
 
   // Open psak din for viewing
   const openPsakForViewing = useCallback((psakId: string, searchTerms: string[]) => {
@@ -943,9 +958,26 @@ export function SmartSearchPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [psakeiDin]);
 
-  // Load psakei din from Supabase - load all psakim with cursor-based pagination
-  const loadPsakeiDin = useCallback(async () => {
-    setIsLoadingPsakim(true);
+  // Load psakei din from local IndexedDB
+  const loadPsakeiDinFromLocal = useCallback(async (): Promise<PsakDin[]> => {
+    try {
+      const localPsakim = await getAllPsakimFromDB();
+      if (localPsakim.length > 0) {
+        toast({
+          title: '📦 נטענו פסקי דין מהאינדקס המקומי',
+          description: `${localPsakim.length} פסקי דין`,
+        });
+        return localPsakim;
+      }
+      return [];
+    } catch (error) {
+      console.error('Error loading from local:', error);
+      return [];
+    }
+  }, []);
+
+  // Load psakei din from cloud (Supabase)
+  const loadPsakeiDinFromCloud = useCallback(async (): Promise<PsakDin[]> => {
     try {
       // First get total count
       const { count: totalCount, error: countError } = await supabase
@@ -968,15 +1000,14 @@ export function SmartSearchPage() {
           .limit(1000);
         
         if (error) throw new Error(error.message);
-        setPsakeiDin((data as PsakDin[]) || []);
         toast({
-          title: 'נטענו פסקי דין',
+          title: '☁️ נטענו פסקי דין מהענן',
           description: `${data?.length || 0} פסקי דין`,
         });
-        return;
+        return (data as PsakDin[]) || [];
       }
       
-      // For larger datasets, use cursor-based pagination with created_at
+      // For larger datasets, use cursor-based pagination
       const PAGE_SIZE = 500;
       const allPsakim: PsakDin[] = [];
       let lastCreatedAt: string | null = null;
@@ -997,35 +1028,75 @@ export function SmartSearchPage() {
         
         if (error) {
           console.error('Supabase error:', error);
-          // If we already have some data, use it
-          if (allPsakim.length > 0) {
-            console.log('Partial load - got', allPsakim.length, 'psakim');
-            break;
-          }
+          if (allPsakim.length > 0) break;
           throw new Error(error.message);
         }
         
         if (data && data.length > 0) {
           allPsakim.push(...(data as PsakDin[]));
           lastCreatedAt = data[data.length - 1].created_at;
-          
-          // Update progress
-          toast({
-            title: 'טוען פסקי דין...',
-            description: `${allPsakim.length} / ${total}`,
-          });
-          
           hasMore = data.length === PAGE_SIZE;
         } else {
           hasMore = false;
         }
       }
       
-      setPsakeiDin(allPsakim);
       toast({
-        title: 'נטענו פסקי דין',
+        title: '☁️ נטענו פסקי דין מהענן',
         description: `${allPsakim.length} פסקי דין`,
       });
+      return allPsakim;
+    } catch (error) {
+      console.error('Error loading from cloud:', error);
+      throw error;
+    }
+  }, []);
+
+  // Main load function - respects dataSource setting
+  const loadPsakeiDin = useCallback(async () => {
+    setIsLoadingPsakim(true);
+    try {
+      let resultPsakim: PsakDin[] = [];
+      
+      // Check if local index exists
+      const indexValid = await isIndexValid(168); // Valid for 7 days
+      
+      if (dataSource === 'local') {
+        // Try local first
+        if (indexValid) {
+          resultPsakim = await loadPsakeiDinFromLocal();
+        }
+        
+        // If no local data, fall back to cloud
+        if (resultPsakim.length === 0) {
+          toast({
+            title: 'אין אינדקס מקומי',
+            description: 'טוען מהענן...',
+          });
+          resultPsakim = await loadPsakeiDinFromCloud();
+        }
+      } else if (dataSource === 'cloud') {
+        // Load only from cloud
+        resultPsakim = await loadPsakeiDinFromCloud();
+      } else if (dataSource === 'both') {
+        // Load from both and merge
+        const [localData, cloudData] = await Promise.all([
+          indexValid ? loadPsakeiDinFromLocal() : Promise.resolve([]),
+          loadPsakeiDinFromCloud()
+        ]);
+        
+        // Merge - cloud takes precedence for duplicates
+        const cloudIds = new Set(cloudData.map(p => p.id));
+        const uniqueLocal = localData.filter(p => !cloudIds.has(p.id));
+        resultPsakim = [...cloudData, ...uniqueLocal];
+        
+        toast({
+          title: '🔄 נטענו פסקי דין משני המקורות',
+          description: `${cloudData.length} מהענן + ${uniqueLocal.length} ייחודיים מהמקומי = ${resultPsakim.length} סה"כ`,
+        });
+      }
+      
+      setPsakeiDin(resultPsakim);
     } catch (error: unknown) {
       console.error('Error loading psakei din:', error);
       const errorMessage = error instanceof Error ? error.message : String(error);
@@ -1037,7 +1108,7 @@ export function SmartSearchPage() {
     } finally {
       setIsLoadingPsakim(false);
     }
-  }, []);
+  }, [dataSource, loadPsakeiDinFromLocal, loadPsakeiDinFromCloud]);
   
   // Search psakei din directly on Supabase (server-side search)
   const searchPsakeiDinOnServer = useCallback(async (searchTerm: string): Promise<PsakDin[]> => {
@@ -2273,7 +2344,7 @@ export function SmartSearchPage() {
           {/* Database Count Card */}
           <Card className="border-2 border-[#b8860b]/30 bg-gradient-to-r from-[#b8860b]/5 to-[#1e3a5f]/5 shadow-sm">
             <CardContent className="py-4">
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between flex-wrap gap-3">
                 <div className="flex items-center gap-4">
                   <div className="p-3 rounded-full bg-[#b8860b]/10">
                     <Database className="w-6 h-6 text-[#b8860b]" />
@@ -2289,10 +2360,65 @@ export function SmartSearchPage() {
                     </p>
                   </div>
                 </div>
-                <div className="flex items-center gap-3">
-                  <Badge className="bg-white text-[#1e3a5f] border border-[#b8860b]">
-                    💾 נתונים מקומיים
+                
+                {/* Data Source Selection */}
+                <div className="flex items-center gap-3 flex-wrap">
+                  <span className="text-sm text-[#1e3a5f]/70">מקור נתונים:</span>
+                  <div className="flex items-center gap-1 bg-white rounded-lg border border-[#b8860b]/50 p-1">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => setDataSource('local')}
+                      className={cn(
+                        "h-8 px-3 text-xs gap-1",
+                        dataSource === 'local' 
+                          ? "bg-[#b8860b] text-white hover:bg-[#996d00]" 
+                          : "text-[#1e3a5f] hover:bg-[#b8860b]/10"
+                      )}
+                    >
+                      <HardDrive className="h-3 w-3" />
+                      מקומי
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => setDataSource('cloud')}
+                      className={cn(
+                        "h-8 px-3 text-xs gap-1",
+                        dataSource === 'cloud' 
+                          ? "bg-[#b8860b] text-white hover:bg-[#996d00]" 
+                          : "text-[#1e3a5f] hover:bg-[#b8860b]/10"
+                      )}
+                    >
+                      ☁️ ענן
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => setDataSource('both')}
+                      className={cn(
+                        "h-8 px-3 text-xs gap-1",
+                        dataSource === 'both' 
+                          ? "bg-[#b8860b] text-white hover:bg-[#996d00]" 
+                          : "text-[#1e3a5f] hover:bg-[#b8860b]/10"
+                      )}
+                    >
+                      🔄 שניהם
+                    </Button>
+                  </div>
+                  
+                  {/* Status Badge */}
+                  <Badge className={cn(
+                    "text-xs",
+                    dataSource === 'local' && "bg-green-100 text-green-700 border-green-300",
+                    dataSource === 'cloud' && "bg-blue-100 text-blue-700 border-blue-300",
+                    dataSource === 'both' && "bg-purple-100 text-purple-700 border-purple-300"
+                  )}>
+                    {dataSource === 'local' && '📦 אינדקס מקומי'}
+                    {dataSource === 'cloud' && '☁️ Supabase'}
+                    {dataSource === 'both' && '🔄 משולב'}
                   </Badge>
+                  
                   <Button 
                     variant="outline" 
                     size="sm" 
@@ -2305,7 +2431,7 @@ export function SmartSearchPage() {
                     ) : (
                       <RefreshCw className="h-4 w-4" />
                     )}
-                    עדכן
+                    טען
                   </Button>
                 </div>
               </div>
