@@ -35,6 +35,7 @@ const MIGRATION_FILES = [
   { name: '20260122135510_6cdee5f3-0af0-4cc7-bf25-40b8c2637b73.sql', description: 'מיגרציה ינואר 2026' },
   { name: '20260129_add_fulltext_search.sql', description: 'הוספת Full-Text Search' },
   { name: '20260129_add_search_psakim_rpc.sql', description: 'הוספת RPC לחיפוש פסקים' },
+  { name: '20260130_add_exec_sql_function.sql', description: 'פונקציית exec_sql להרצת מיגרציות' },
 ];
 
 // GitHub raw URL for migrations
