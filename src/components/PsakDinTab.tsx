@@ -1,22 +1,47 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Progress } from "@/components/ui/progress";
 import { supabase } from "@/integrations/supabase/client";
-import { Calendar, Building2, FileText, List, BookOpen, Sparkles, Brain, Loader2, Link, Plus } from "lucide-react";
+import { Calendar, Building2, FileText, List, BookOpen, Sparkles, Brain, Loader2, Link, Plus, Search, Trash2, Filter, Edit, Wand2 } from "lucide-react";
 import PsakDinViewDialog from "./PsakDinViewDialog";
 import PsakDinEditDialog from "./PsakDinEditDialog";
 import PsakDinActions from "./PsakDinActions";
 import BulkActionsBar from "./BulkActionsBar";
 import GemaraPsakDinIndex from "./GemaraPsakDinIndex";
 import SourcesTreeIndex from "./SourcesTreeIndex";
+import { DataQualityChecker } from "./DataQualityChecker";
 import { useToast } from "@/hooks/use-toast";
 import { FolderTree } from "lucide-react";
 
 const ITEMS_PER_PAGE = 50;
+
+// Pattern to detect junk/fake psakim
+const JUNK_TITLE_PATTERN = 'אתר פסקי דין רבניים';
+const JUNK_CONTENT_PATTERNS = [
+  'לא נמצא הפריט המבוקש',
+  'דף בית מפתח פסקי הדין',
+  'חיפוש מתקדם מאמרים ועיונים',
+  'צור קשר אודות English',
+  'psakim.org',
+];
+
+const isJunkPsak = (psak: any): boolean => {
+  const title = psak.title?.toLowerCase() || '';
+  const summary = (psak.summary || psak.full_text || '').toLowerCase();
+  
+  if (title.includes(JUNK_TITLE_PATTERN.toLowerCase())) return true;
+  
+  for (const pattern of JUNK_CONTENT_PATTERNS) {
+    if (summary.includes(pattern.toLowerCase())) return true;
+  }
+  
+  return false;
+};
 
 const PsakDinTab = () => {
   const [psakim, setPsakim] = useState<any[]>([]);
@@ -34,6 +59,10 @@ const PsakDinTab = () => {
   const [editingPsak, setEditingPsak] = useState<any | null>(null);
   const [isNewPsak, setIsNewPsak] = useState(false);
   const [selectedForBulk, setSelectedForBulk] = useState<Set<string>>(new Set());
+  const [searchQuery, setSearchQuery] = useState("");
+  const [showJunkOnly, setShowJunkOnly] = useState(false);
+  const [deletingJunk, setDeletingJunk] = useState(false);
+  const [cleaningTitles, setCleaningTitles] = useState(false);
   const { toast } = useToast();
 
   const totalPages = Math.ceil(totalCount / ITEMS_PER_PAGE);
@@ -135,6 +164,205 @@ const PsakDinTab = () => {
     loadTotalUnlinkedCount();
   };
 
+  // Filter psakim based on search and junk filter
+  const filteredPsakim = useMemo(() => {
+    let filtered = psakim;
+    
+    // Filter by search query
+    if (searchQuery.trim()) {
+      const query = searchQuery.toLowerCase();
+      filtered = filtered.filter(p => 
+        p.title?.toLowerCase().includes(query) ||
+        p.summary?.toLowerCase().includes(query) ||
+        p.court?.toLowerCase().includes(query) ||
+        p.case_number?.toLowerCase().includes(query)
+      );
+    }
+    
+    // Filter junk only
+    if (showJunkOnly) {
+      filtered = filtered.filter(isJunkPsak);
+    }
+    
+    return filtered;
+  }, [psakim, searchQuery, showJunkOnly]);
+  
+  // Count junk psakim in current view
+  const junkCount = useMemo(() => {
+    return psakim.filter(isJunkPsak).length;
+  }, [psakim]);
+  
+  // Select all junk psakim for bulk delete
+  const selectAllJunk = () => {
+    const junkIds = psakim.filter(isJunkPsak).map(p => p.id);
+    setSelectedForBulk(new Set(junkIds));
+    toast({
+      title: `נבחרו ${junkIds.length} פסקי דין זבל`,
+      description: 'לחץ על "מחק נבחרים" למחיקה',
+    });
+  };
+  
+  // Find and delete ALL junk psakim from entire database
+  const findAndDeleteAllJunk = async () => {
+    if (!confirm('האם אתה בטוח? פעולה זו תמצא ותמחק את כל פסקי הדין הפייק מהמאגר כולו!')) {
+      return;
+    }
+    
+    setDeletingJunk(true);
+    
+    try {
+      // First find all junk psakim by title pattern
+      const { data: junkByTitle, error: titleError } = await supabase
+        .from('psakei_din')
+        .select('id, title')
+        .ilike('title', `%${JUNK_TITLE_PATTERN}%`);
+      
+      if (titleError) throw titleError;
+      
+      const junkIds = new Set(junkByTitle?.map(p => p.id) || []);
+      
+      toast({
+        title: `נמצאו ${junkIds.size} פסקי דין זבל`,
+        description: 'מוחק...',
+      });
+      
+      if (junkIds.size === 0) {
+        toast({ title: 'לא נמצאו פסקי דין זבל' });
+        return;
+      }
+      
+      // Delete in batches of 100
+      const idsArray = Array.from(junkIds);
+      let deleted = 0;
+      
+      for (let i = 0; i < idsArray.length; i += 100) {
+        const batch = idsArray.slice(i, i + 100);
+        const { error } = await supabase
+          .from('psakei_din')
+          .delete()
+          .in('id', batch);
+        
+        if (error) throw error;
+        deleted += batch.length;
+      }
+      
+      toast({
+        title: `נמחקו ${deleted} פסקי דין זבל!`,
+        description: 'המאגר נוקה בהצלחה',
+      });
+      
+      // Reload
+      loadPsakim(currentPage);
+      loadTotalUnlinkedCount();
+      
+    } catch (error) {
+      console.error('Error deleting junk:', error);
+      toast({
+        title: 'שגיאה במחיקה',
+        description: String(error),
+        variant: 'destructive',
+      });
+    } finally {
+      setDeletingJunk(false);
+    }
+  };
+
+  // Clean a single title - remove non-Hebrew text and duplicate icons
+  const cleanTitle = (title: string): string => {
+    if (!title) return title;
+    
+    let cleaned = title;
+    
+    // Remove duplicate/adjacent emojis and icons (two or more emojis next to each other)
+    // Match emoji patterns
+    const emojiPattern = /([\u{1F300}-\u{1F9FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{1F600}-\u{1F64F}\u{1F680}-\u{1F6FF}])/gu;
+    // Remove consecutive emojis (2 or more)
+    cleaned = cleaned.replace(/([\u{1F300}-\u{1F9FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{1F600}-\u{1F64F}\u{1F680}-\u{1F6FF}]\s*){2,}/gu, '');
+    
+    // Remove English text (keep Hebrew, numbers, punctuation, and spaces)
+    // Hebrew range: \u0590-\u05FF (includes nikud and taamim)
+    // Also keep common punctuation and numbers
+    cleaned = cleaned.replace(/[a-zA-Z]+/g, '');
+    
+    // Remove URLs
+    cleaned = cleaned.replace(/https?:\/\/[^\s]+/gi, '');
+    cleaned = cleaned.replace(/www\.[^\s]+/gi, '');
+    
+    // Remove email addresses
+    cleaned = cleaned.replace(/[\w.-]+@[\w.-]+\.[a-z]{2,}/gi, '');
+    
+    // Remove excess whitespace
+    cleaned = cleaned.replace(/\s+/g, ' ').trim();
+    
+    // Remove leading/trailing punctuation that doesn't make sense
+    cleaned = cleaned.replace(/^[\s,.:;\-|/]+/, '').replace(/[\s,.:;\-|/]+$/, '');
+    
+    return cleaned;
+  };
+
+  // Clean all titles in the database
+  const cleanAllTitles = async () => {
+    if (!confirm('האם לנקות את כל הכותרות? הפעולה תסיר טקסט באנגלית ואייקונים כפולים מכל הכותרות.')) {
+      return;
+    }
+    
+    setCleaningTitles(true);
+    
+    try {
+      // Get all psakim with titles
+      const { data: allPsakim, error: fetchError } = await supabase
+        .from('psakei_din')
+        .select('id, title');
+      
+      if (fetchError) throw fetchError;
+      
+      let updatedCount = 0;
+      let skippedCount = 0;
+      
+      // Process in batches
+      for (const psak of allPsakim || []) {
+        if (!psak.title) {
+          skippedCount++;
+          continue;
+        }
+        
+        const cleanedTitle = cleanTitle(psak.title);
+        
+        // Only update if the title changed
+        if (cleanedTitle !== psak.title && cleanedTitle.length > 0) {
+          const { error: updateError } = await supabase
+            .from('psakei_din')
+            .update({ title: cleanedTitle })
+            .eq('id', psak.id);
+          
+          if (!updateError) {
+            updatedCount++;
+          }
+        } else {
+          skippedCount++;
+        }
+      }
+      
+      toast({
+        title: `נוקו ${updatedCount} כותרות!`,
+        description: `${skippedCount} כותרות לא הצטרכו שינוי`,
+      });
+      
+      // Reload
+      loadPsakim(currentPage);
+      
+    } catch (error) {
+      console.error('Error cleaning titles:', error);
+      toast({
+        title: 'שגיאה בניקוי כותרות',
+        description: String(error),
+        variant: 'destructive',
+      });
+    } finally {
+      setCleaningTitles(false);
+    }
+  };
+
   const toggleBulkSelect = (id: string) => {
     setSelectedForBulk(prev => {
       const newSet = new Set(prev);
@@ -148,7 +376,7 @@ const PsakDinTab = () => {
   };
 
   const selectAllForBulk = () => {
-    setSelectedForBulk(new Set(psakim.map(p => p.id)));
+    setSelectedForBulk(new Set(filteredPsakim.map(p => p.id)));
   };
 
   const clearBulkSelection = () => {
@@ -252,6 +480,43 @@ const PsakDinTab = () => {
               <div className="text-center py-8 text-muted-foreground">טוען...</div>
             ) : (
               <div className="max-w-4xl mx-auto space-y-4">
+                {/* Database Count Card */}
+                <Card className="mb-4 border-2 border-primary/20 bg-gradient-to-r from-primary/5 to-primary/10">
+                  <CardContent className="py-4">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-4">
+                        <div className="p-3 rounded-full bg-primary/10">
+                          <FileText className="w-6 h-6 text-primary" />
+                        </div>
+                        <div>
+                          <p className="text-sm text-muted-foreground">סה"כ פסקי דין במאגר</p>
+                          <p className="text-3xl font-bold text-primary">
+                            {loading ? (
+                              <Loader2 className="w-6 h-6 animate-spin" />
+                            ) : (
+                              totalCount.toLocaleString('he-IL')
+                            )}
+                          </p>
+                        </div>
+                      </div>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => loadPsakim(currentPage)}
+                        disabled={loading}
+                        className="gap-2"
+                      >
+                        {loading ? (
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                        ) : (
+                          <span className="rotate-180">↻</span>
+                        )}
+                        עדכן
+                      </Button>
+                    </div>
+                  </CardContent>
+                </Card>
+
                 {/* Header */}
                 <div className="flex items-center justify-between mb-6 flex-row-reverse">
                   <div className="flex items-center gap-3">
@@ -264,6 +529,23 @@ const PsakDinTab = () => {
                       <Plus className="w-4 h-4" />
                       הוסף פסק דין
                     </Button>
+                    <DataQualityChecker 
+                      psakeiDin={psakim.map(psak => ({
+                        id: psak.id,
+                        title: psak.title || '',
+                        summary: psak.summary || '',
+                        full_text: psak.full_text || psak.summary || '',
+                        court: psak.court || '',
+                        year: psak.year || 0,
+                        case_number: psak.case_number,
+                        tags: psak.tags,
+                        content_hash: psak.content_hash,
+                        created_at: psak.created_at,
+                      }))}
+                      onRefresh={() => loadPsakim(currentPage)}
+                      isLoading={loading}
+                      compact={true}
+                    />
                   </div>
                   
                   {totalUnlinkedCount > 0 && (
@@ -295,10 +577,95 @@ const PsakDinTab = () => {
                   )}
                 </div>
 
+                {/* Search and Filter Bar */}
+                <Card className="border border-border">
+                  <CardContent className="p-3">
+                    <div className="flex flex-wrap gap-3 items-center">
+                      {/* Search Input */}
+                      <div className="flex-1 min-w-[200px]">
+                        <div className="relative">
+                          <Search className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+                          <Input
+                            placeholder="חיפוש לפי כותרת, בית משפט, תקציר..."
+                            value={searchQuery}
+                            onChange={(e) => setSearchQuery(e.target.value)}
+                            className="pr-10"
+                          />
+                        </div>
+                      </div>
+                      
+                      {/* Junk Filter Toggle */}
+                      <Button
+                        variant={showJunkOnly ? "default" : "outline"}
+                        size="sm"
+                        onClick={() => setShowJunkOnly(!showJunkOnly)}
+                        className="gap-2"
+                      >
+                        <Filter className="w-4 h-4" />
+                        {showJunkOnly ? 'הצג הכל' : `הצג רק זבל (${junkCount})`}
+                      </Button>
+                      
+                      {/* Select All Junk */}
+                      {junkCount > 0 && (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={selectAllJunk}
+                          className="gap-2 text-orange-600 border-orange-300 hover:bg-orange-50"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                          בחר זבל ({junkCount})
+                        </Button>
+                      )}
+                      
+                      {/* Delete All Junk from DB */}
+                      <Button
+                        variant="destructive"
+                        size="sm"
+                        onClick={findAndDeleteAllJunk}
+                        disabled={deletingJunk}
+                        className="gap-2"
+                      >
+                        {deletingJunk ? (
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                        ) : (
+                          <Trash2 className="w-4 h-4" />
+                        )}
+                        🗑️ מחק כל הזבל מהמאגר
+                      </Button>
+                      
+                      {/* Clean All Titles Button */}
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={cleanAllTitles}
+                        disabled={cleaningTitles}
+                        className="gap-2 text-blue-600 border-blue-300 hover:bg-blue-50"
+                      >
+                        {cleaningTitles ? (
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                        ) : (
+                          <Wand2 className="w-4 h-4" />
+                        )}
+                        ✨ נקה כותרות (הסר אנגלית ואייקונים)
+                      </Button>
+                    </div>
+                    
+                    {/* Search Results Info */}
+                    {(searchQuery || showJunkOnly) && (
+                      <div className="mt-2 text-sm text-muted-foreground">
+                        מציג {filteredPsakim.length} תוצאות
+                        {searchQuery && ` עבור "${searchQuery}"`}
+                        {showJunkOnly && ' (סינון: זבל בלבד)'}
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+
                 {/* Bulk Actions Bar */}
                 <BulkActionsBar
                   selectedCount={selectedForBulk.size}
-                  totalCount={psakim.length}
+                  totalCount={filteredPsakim.length}
                   onSelectAll={selectAllForBulk}
                   onClearSelection={clearBulkSelection}
                   selectedIds={Array.from(selectedForBulk)}
@@ -351,19 +718,28 @@ const PsakDinTab = () => {
                   </Card>
                 )}
                 
-                {psakim.map((psak) => {
+                {filteredPsakim.map((psak) => {
                   const hasLinks = psakLinks.has(psak.id);
                   const linkCount = psakLinks.get(psak.id) || 0;
                   const isSelected = selectedForAnalysis.has(psak.id);
+                  const isPsakJunk = isJunkPsak(psak);
                   
                   return (
                     <Card 
                       key={psak.id} 
                       className={`border shadow-sm hover:shadow-md transition-shadow ${
-                        isSelected ? 'border-accent ring-1 ring-accent' : 'border-border'
+                        isSelected ? 'border-accent ring-1 ring-accent' : 
+                        isPsakJunk ? 'border-red-300 bg-red-50/30' : 'border-border'
                       }`}
                     >
                       <CardContent className="p-4">
+                        {/* Junk Badge */}
+                        {isPsakJunk && (
+                          <Badge variant="destructive" className="mb-2">
+                            🗑️ זבל / דף שגיאה
+                          </Badge>
+                        )}
+                        
                         {/* Top Row: Title + Action Items */}
                         <div className="flex items-start justify-between gap-3 mb-3">
                           {/* Right Side: Title and Meta */}

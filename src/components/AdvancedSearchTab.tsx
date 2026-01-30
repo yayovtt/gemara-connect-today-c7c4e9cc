@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { Search, Filter, X, Loader2, RefreshCw, Settings2, ChevronDown, Sparkles, History, FileText, Bookmark, FlaskConical, Download, Share2 } from 'lucide-react';
+import { Search, Filter, X, Loader2, RefreshCw, Settings2, ChevronDown, Sparkles, History, FileText, Bookmark, FlaskConical, Download, Share2, BarChart3 } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
@@ -53,6 +53,7 @@ import { useWordLists } from '@/hooks/useWordLists';
 import { useLocalStorage as useLocalStorageSearch } from '@/hooks/useLocalStorageSearch';
 import { matchesCondition, checkFilterRules, highlightSearchTerms } from '@/utils/searchUtils';
 import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts';
+import { DataQualityChecker } from '@/components/DataQualityChecker';
 
 const RANGE_PRESETS = {
   lines: [1, 2, 3, 5, 10],
@@ -382,6 +383,22 @@ const AdvancedSearchTab = () => {
               {documentsCount.toLocaleString()} מסמכים
             </Badge>
           )}
+          {/* Data Quality Checker Button */}
+          <DataQualityChecker 
+            psakeiDin={results.map(r => ({
+              id: r.document.id,
+              title: r.document.title || '',
+              summary: r.document.content?.slice(0, 500) || '',
+              full_text: r.document.content,
+              court: r.document.court || '',
+              year: r.document.year || 0,
+              case_number: r.document.case_number,
+              content_hash: r.document.content_hash,
+            }))}
+            onRefresh={reloadDocuments}
+            isLoading={isLoading}
+            compact={true}
+          />
           <Button 
             variant="outline" 
             size="icon"

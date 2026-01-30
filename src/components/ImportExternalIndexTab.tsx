@@ -8,12 +8,13 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { supabase } from "@/integrations/supabase/client";
 import {
   Upload, FileJson, Database, CheckCircle2, AlertCircle,
-  Loader2, BookOpen, Link2, RefreshCw, FolderArchive, FileText, Eye
+  Loader2, BookOpen, Link2, RefreshCw, FolderArchive, FileText, Eye, Sparkles
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { fromHebrewNumeral } from "@/lib/hebrewNumbers";
 import JSZip from "jszip";
 import { Archive } from "libarchive.js";
+import { DataQualityChecker } from "./DataQualityChecker";
 
 // Map Hebrew masechet names to English for sugya_id
 const MASECHET_MAP: Record<string, string> = {
@@ -653,6 +654,27 @@ const ImportExternalIndexTab = () => {
 
   return (
     <div className="space-y-6" dir="rtl">
+      {/* Header with Data Quality Button */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-xl font-bold">ייבוא אינדקס</h2>
+          <p className="text-sm text-muted-foreground">ייבא קבצי אינדקס ופסקי דין</p>
+        </div>
+        {/* Data Quality Checker Button */}
+        <DataQualityChecker 
+          psakeiDin={zipAnalysis?.psakDinFiles.map((file, i) => ({
+            id: String(i),
+            title: file.name.replace(/\.[^/.]+$/, ''),
+            summary: file.preview || '',
+            full_text: file.content,
+            court: 'ייבוא',
+            year: new Date().getFullYear(),
+          })) || []}
+          isLoading={analyzingZip || importing}
+          compact={true}
+        />
+      </div>
+
       <Tabs defaultValue="zip" className="w-full">
         <TabsList className="grid w-full grid-cols-2">
           <TabsTrigger value="zip">

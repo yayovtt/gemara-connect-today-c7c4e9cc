@@ -4,9 +4,10 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { supabase } from "@/integrations/supabase/client";
-import { Search, Calendar, Building2, FileText, ExternalLink, Loader2 } from "lucide-react";
+import { Search, Calendar, Building2, FileText, ExternalLink, Loader2, Sparkles } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import PsakDinViewDialog from "./PsakDinViewDialog";
+import { DataQualityChecker } from "./DataQualityChecker";
 
 const SearchPsakDinTab = () => {
   const [query, setQuery] = useState("");
@@ -78,10 +79,29 @@ const SearchPsakDinTab = () => {
       <div className="max-w-4xl mx-auto space-y-6">
         <Card className="border border-border shadow-sm">
           <CardHeader>
-            <CardTitle className="text-xl font-bold text-foreground">חיפוש פסקי דין</CardTitle>
-            <p className="text-sm text-muted-foreground">
-              חיפוש במאגרים: פסקדין, דין תורה, דעת, ספריא, בתי הדין הרבניים ועוד
-            </p>
+            <div className="flex items-center justify-between">
+              <div>
+                <CardTitle className="text-xl font-bold text-foreground">חיפוש פסקי דין</CardTitle>
+                <p className="text-sm text-muted-foreground">
+                  חיפוש במאגרים: פסקדין, דין תורה, דעת, ספריא, בתי הדין הרבניים ועוד
+                </p>
+              </div>
+              {/* Data Quality Checker Button */}
+              <DataQualityChecker 
+                psakeiDin={results.map((psak, i) => ({
+                  id: String(i),
+                  title: psak.title || '',
+                  summary: psak.summary || '',
+                  full_text: psak.summary,
+                  court: psak.court || '',
+                  year: psak.year || 0,
+                  case_number: psak.caseNumber,
+                  tags: psak.tags,
+                }))}
+                isLoading={loading}
+                compact={true}
+              />
+            </div>
           </CardHeader>
           <CardContent>
             <div className="flex gap-2">

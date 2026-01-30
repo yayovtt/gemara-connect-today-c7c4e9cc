@@ -56,7 +56,15 @@ import {
   Loader2,
   ChevronDown,
   List,
-  AlignJustify
+  AlignJustify,
+  Edit,
+  Pencil,
+  Zap,
+  Brain,
+  HardDrive,
+  Gauge,
+  CheckSquare,
+  Square,
 } from 'lucide-react';
 import { toast } from '@/hooks/use-toast';
 import { cn } from '@/lib/utils';
@@ -65,6 +73,19 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/component
 import mammoth from 'mammoth';
 import * as pdfjs from 'pdfjs-dist';
 import type { TextItem } from 'pdfjs-dist/types/src/display/api';
+import { useSearchWorker } from '@/hooks/useSearchWorker';
+import { serverFullTextSearch, searchCache, createDebouncedSearch } from '@/services/advancedSearchService';
+import {
+  buildSearchIndex,
+  loadSearchIndex,
+  searchWithIndex,
+  searchWithContext,
+  getIndexMetadata,
+  clearSearchIndex,
+  isIndexValid,
+  type SearchIndex,
+  type SearchResultWithContext,
+} from '@/services/indexedDBService';
 
 // Set up PDF.js worker
 pdfjs.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/pdf.worker.min.js`;
@@ -199,6 +220,8 @@ interface SearchResult {
   // Context lines around the match
   contextBefore?: string;
   contextAfter?: string;
+  // HTML highlighted text (with <mark> tags)
+  highlightedText?: string;
   // Source info for psakei din
   sourceType: 'psak' | 'custom';
   psakId?: string;
@@ -246,6 +269,36 @@ const DEFAULT_SMART_OPTIONS: SmartSearchOptions = {
   caseInsensitive: true,
   wordBoundary: false,
 };
+
+// localStorage keys for persisting settings
+const STORAGE_KEYS = {
+  ADVANCED_SEARCH_OPTIONS: 'smartSearch_advancedOptions',
+  SMART_OPTIONS: 'smartSearch_smartOptions',
+  RESULTS_DISPLAY_MODE: 'smartSearch_resultsDisplayMode',
+  USE_STREAMING_SEARCH: 'smartSearch_useStreamingSearch',
+};
+
+// Helper to load from localStorage with fallback
+function loadFromStorage<T>(key: string, fallback: T): T {
+  try {
+    const stored = localStorage.getItem(key);
+    if (stored) {
+      return { ...fallback, ...JSON.parse(stored) };
+    }
+  } catch (e) {
+    console.warn('Failed to load from localStorage:', key, e);
+  }
+  return fallback;
+}
+
+// Helper to save to localStorage
+function saveToStorage<T>(key: string, value: T): void {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch (e) {
+    console.warn('Failed to save to localStorage:', key, e);
+  }
+}
 
 // Hebrew utilities
 const HEBREW_NUMBERS: Record<string, number> = {
@@ -547,8 +600,10 @@ export function SmartSearchPage() {
   const [searchScope, setSearchScope] = useState<'all' | 'selected' | 'custom'>('all');
   const [includeInputText, setIncludeInputText] = useState(true);
   
-  // Global smart search options
-  const [globalSmartOptions, setGlobalSmartOptions] = useState<SmartSearchOptions>({ ...DEFAULT_SMART_OPTIONS });
+  // Global smart search options - load from localStorage
+  const [globalSmartOptions, setGlobalSmartOptions] = useState<SmartSearchOptions>(() => 
+    loadFromStorage(STORAGE_KEYS.SMART_OPTIONS, DEFAULT_SMART_OPTIONS)
+  );
 
   // Validation results
   const [validationResults, setValidationResults] = useState<{ rule: string; passed: boolean; message: string }[]>([]);
@@ -568,8 +623,101 @@ export function SmartSearchPage() {
     searchTerms: string[];
   }>({ open: false, psak: null, searchTerms: [] });
 
-  // Results Display Mode
-  const [resultsDisplayMode, setResultsDisplayMode] = useState<'compact' | 'detailed' | 'list'>('compact');
+  // Results Display Mode - load from localStorage
+  const [resultsDisplayMode, setResultsDisplayMode] = useState<'compact' | 'detailed' | 'list'>(() => 
+    loadFromStorage(STORAGE_KEYS.RESULTS_DISPLAY_MODE, 'compact') as 'compact' | 'detailed' | 'list'
+  );
+
+  // Edit Dialog State
+  const [editDialog, setEditDialog] = useState<{
+    open: boolean;
+    psak: PsakDin | null;
+    newTitle: string;
+  }>({ open: false, psak: null, newTitle: '' });
+  
+  // Deleting state
+  const [isDeletingPsakim, setIsDeletingPsakim] = useState(false);
+  
+  // Search limit and progress
+  const [searchLimit, setSearchLimit] = useState<number | 'all'>('all');
+  const [searchProgress, setSearchProgress] = useState<{
+    current: number;
+    total: number;
+    percentage: number;
+    isActive: boolean;
+  }>({ current: 0, total: 0, percentage: 0, isActive: false });
+
+  // IndexedDB Pre-indexing state
+  const [localIndex, setLocalIndex] = useState<SearchIndex | null>(null);
+  const [indexMeta, setIndexMeta] = useState<{ psakimCount: number; lastUpdated: string; totalWords: number } | null>(null);
+  const [isIndexBuilding, setIsIndexBuilding] = useState(false);
+  const [indexBuildProgress, setIndexBuildProgress] = useState({ current: 0, total: 0 });
+  
+  // Streaming search state - load from localStorage
+  const [useStreamingSearch, setUseStreamingSearch] = useState(() => 
+    loadFromStorage(STORAGE_KEYS.USE_STREAMING_SEARCH, true)
+  );
+  const [streamingResults, setStreamingResults] = useState<SearchResult[]>([]);
+  const searchWorkerRef = useRef<Worker | null>(null);
+
+  // Default values for advanced search options
+  const DEFAULT_ADVANCED_OPTIONS = {
+    useWorker: true,       // Use Web Worker for search
+    useServerFTS: true,    // Use server Full-Text Search
+    fuzzySearch: true,     // Find similar words
+    useRoots: true,        // Use Hebrew roots (שורשים)
+    useSynonyms: true,     // Use synonyms (מילים נרדפות)
+    useCache: true,        // Cache results
+    // New advanced Hebrew options
+    expandAcronyms: true,  // Expand acronyms (ראשי תיבות)
+    phoneticSearch: true,  // Phonetic matching (חיפוש פונטי)
+    ocrCorrection: true,   // OCR error correction
+    useNgrams: true,       // N-gram partial matching
+    removeStopWords: true, // Remove stop words
+    fuzzyThreshold: 0.7,   // Fuzzy match threshold (0-1)
+    boostTitle: 2.0,       // Title match boost
+    boostExactMatch: 3.0,  // Exact match boost
+    useLocalIndex: true,   // Use IndexedDB pre-indexing for instant search
+  };
+
+  // Advanced search options - load from localStorage
+  const [advancedSearchOptions, setAdvancedSearchOptions] = useState(() => 
+    loadFromStorage(STORAGE_KEYS.ADVANCED_SEARCH_OPTIONS, DEFAULT_ADVANCED_OPTIONS)
+  );
+
+  // Search Worker hook
+  const {
+    isWorkerReady,
+    isIndexing,
+    indexStats,
+    buildIndex,
+    search: workerSearch,
+    getSuggestions,
+  } = useSearchWorker();
+
+  // Build search index when psakim are loaded
+  useEffect(() => {
+    if (psakeiDin.length > 0 && advancedSearchOptions.useWorker) {
+      buildIndex(psakeiDin as any);
+    }
+  }, [psakeiDin, advancedSearchOptions.useWorker, buildIndex]);
+
+  // Save settings to localStorage when they change
+  useEffect(() => {
+    saveToStorage(STORAGE_KEYS.ADVANCED_SEARCH_OPTIONS, advancedSearchOptions);
+  }, [advancedSearchOptions]);
+
+  useEffect(() => {
+    saveToStorage(STORAGE_KEYS.SMART_OPTIONS, globalSmartOptions);
+  }, [globalSmartOptions]);
+
+  useEffect(() => {
+    saveToStorage(STORAGE_KEYS.RESULTS_DISPLAY_MODE, resultsDisplayMode);
+  }, [resultsDisplayMode]);
+
+  useEffect(() => {
+    saveToStorage(STORAGE_KEYS.USE_STREAMING_SEARCH, useStreamingSearch);
+  }, [useStreamingSearch]);
 
   // Open psak din for viewing
   const openPsakForViewing = useCallback((psakId: string, searchTerms: string[]) => {
@@ -578,6 +726,110 @@ export function SmartSearchPage() {
       setViewPsakDialog({ open: true, psak, searchTerms });
     }
   }, [psakeiDin]);
+
+  // Open edit dialog for a psak
+  const openEditDialog = useCallback((psak: PsakDin) => {
+    setEditDialog({ open: true, psak, newTitle: psak.title });
+  }, []);
+
+  // Save edited title
+  const saveEditedTitle = useCallback(async () => {
+    if (!editDialog.psak || !editDialog.newTitle.trim()) return;
+    
+    try {
+      const { error } = await supabase
+        .from('psakei_din')
+        .update({ title: editDialog.newTitle.trim() })
+        .eq('id', editDialog.psak.id);
+      
+      if (error) throw error;
+      
+      // Update local state
+      setPsakeiDin(prev => prev.map(p => 
+        p.id === editDialog.psak!.id 
+          ? { ...p, title: editDialog.newTitle.trim() }
+          : p
+      ));
+      
+      toast({
+        title: 'הכותרת עודכנה',
+        description: 'פסק הדין עודכן בהצלחה',
+      });
+      
+      setEditDialog({ open: false, psak: null, newTitle: '' });
+    } catch (error) {
+      console.error('Error updating title:', error);
+      toast({
+        title: 'שגיאה',
+        description: 'לא ניתן לעדכן את הכותרת',
+        variant: 'destructive',
+      });
+    }
+  }, [editDialog]);
+
+  // Delete single psak
+  const deletePsak = useCallback(async (psakId: string) => {
+    if (!confirm('האם אתה בטוח שברצונך למחוק פסק דין זה?')) return;
+    
+    try {
+      const { error } = await supabase
+        .from('psakei_din')
+        .delete()
+        .eq('id', psakId);
+      
+      if (error) throw error;
+      
+      setPsakeiDin(prev => prev.filter(p => p.id !== psakId));
+      setSelectedPsakim(prev => prev.filter(id => id !== psakId));
+      
+      toast({
+        title: 'נמחק',
+        description: 'פסק הדין נמחק בהצלחה',
+      });
+    } catch (error) {
+      console.error('Error deleting psak:', error);
+      toast({
+        title: 'שגיאה',
+        description: 'לא ניתן למחוק את פסק הדין',
+        variant: 'destructive',
+      });
+    }
+  }, []);
+
+  // Delete selected psakim
+  const deleteSelectedPsakim = useCallback(async () => {
+    if (selectedPsakim.length === 0) return;
+    if (!confirm(`האם אתה בטוח שברצונך למחוק ${selectedPsakim.length} פסקי דין?`)) return;
+    
+    setIsDeletingPsakim(true);
+    
+    try {
+      const { error } = await supabase
+        .from('psakei_din')
+        .delete()
+        .in('id', selectedPsakim);
+      
+      if (error) throw error;
+      
+      setPsakeiDin(prev => prev.filter(p => !selectedPsakim.includes(p.id)));
+      
+      toast({
+        title: 'נמחקו בהצלחה',
+        description: `${selectedPsakim.length} פסקי דין נמחקו`,
+      });
+      
+      setSelectedPsakim([]);
+    } catch (error) {
+      console.error('Error deleting psakim:', error);
+      toast({
+        title: 'שגיאה',
+        description: 'לא ניתן למחוק את פסקי הדין',
+        variant: 'destructive',
+      });
+    } finally {
+      setIsDeletingPsakim(false);
+    }
+  }, [selectedPsakim]);
 
   // Check for duplicates and low quality psakim
   const runDataQualityCheck = useCallback(async () => {
@@ -691,26 +943,88 @@ export function SmartSearchPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [psakeiDin]);
 
-  // Load psakei din from Supabase - simple load without timeout
+  // Load psakei din from Supabase - load all psakim with cursor-based pagination
   const loadPsakeiDin = useCallback(async () => {
     setIsLoadingPsakim(true);
     try {
-      // Simple query with limit - select all fields
-      const { data, error } = await supabase
+      // First get total count
+      const { count: totalCount, error: countError } = await supabase
         .from('psakei_din')
-        .select('*')
-        .order('created_at', { ascending: false })
-        .limit(500);
-
-      if (error) {
-        console.error('Supabase error:', error);
-        throw new Error(error.message);
+        .select('*', { count: 'exact', head: true });
+      
+      if (countError) {
+        console.error('Count error:', countError);
+        throw new Error(countError.message);
       }
       
-      setPsakeiDin((data as PsakDin[]) || []);
+      const total = totalCount || 0;
+      
+      // For small datasets, load all at once
+      if (total <= 1000) {
+        const { data, error } = await supabase
+          .from('psakei_din')
+          .select('*')
+          .order('created_at', { ascending: false })
+          .limit(1000);
+        
+        if (error) throw new Error(error.message);
+        setPsakeiDin((data as PsakDin[]) || []);
+        toast({
+          title: 'נטענו פסקי דין',
+          description: `${data?.length || 0} פסקי דין`,
+        });
+        return;
+      }
+      
+      // For larger datasets, use cursor-based pagination with created_at
+      const PAGE_SIZE = 500;
+      const allPsakim: PsakDin[] = [];
+      let lastCreatedAt: string | null = null;
+      let hasMore = true;
+      
+      while (hasMore) {
+        let query = supabase
+          .from('psakei_din')
+          .select('*')
+          .order('created_at', { ascending: false })
+          .limit(PAGE_SIZE);
+        
+        if (lastCreatedAt) {
+          query = query.lt('created_at', lastCreatedAt);
+        }
+        
+        const { data, error } = await query;
+        
+        if (error) {
+          console.error('Supabase error:', error);
+          // If we already have some data, use it
+          if (allPsakim.length > 0) {
+            console.log('Partial load - got', allPsakim.length, 'psakim');
+            break;
+          }
+          throw new Error(error.message);
+        }
+        
+        if (data && data.length > 0) {
+          allPsakim.push(...(data as PsakDin[]));
+          lastCreatedAt = data[data.length - 1].created_at;
+          
+          // Update progress
+          toast({
+            title: 'טוען פסקי דין...',
+            description: `${allPsakim.length} / ${total}`,
+          });
+          
+          hasMore = data.length === PAGE_SIZE;
+        } else {
+          hasMore = false;
+        }
+      }
+      
+      setPsakeiDin(allPsakim);
       toast({
         title: 'נטענו פסקי דין',
-        description: `${data?.length || 0} פסקי דין`,
+        description: `${allPsakim.length} פסקי דין`,
       });
     } catch (error: unknown) {
       console.error('Error loading psakei din:', error);
@@ -730,12 +1044,11 @@ export function SmartSearchPage() {
     if (!searchTerm.trim()) return [];
     
     try {
-      // Use textSearch or simple ilike for search
+      // Use textSearch or simple ilike for search - no limit for full results
       const { data, error } = await supabase
         .from('psakei_din')
         .select('*')
-        .or(`title.ilike.%${searchTerm}%,summary.ilike.%${searchTerm}%,court.ilike.%${searchTerm}%`)
-        .limit(200);
+        .or(`title.ilike.%${searchTerm}%,summary.ilike.%${searchTerm}%,court.ilike.%${searchTerm}%`);
       
       if (error) {
         console.error('Search error:', error);
@@ -743,14 +1056,82 @@ export function SmartSearchPage() {
         const { data: fallbackData } = await supabase
           .from('psakei_din')
           .select('*')
-          .ilike('title', `%${searchTerm}%`)
-          .limit(200);
+          .ilike('title', `%${searchTerm}%`);
         return fallbackData || [];
       }
       
       return data || [];
     } catch (error) {
       console.error('Server search error:', error);
+      return [];
+    }
+  }, []);
+
+  // Advanced server-side search with pattern/regex support using RPC
+  const searchPsakeiDinAdvanced = useCallback(async (
+    conditions: SearchCondition[],
+    limit: number = 500
+  ): Promise<PsakDin[]> => {
+    try {
+      // Check if we have a pattern condition - use RPC for regex
+      const patternCondition = conditions.find(c => c.operator === 'pattern');
+      const containsCondition = conditions.find(c => c.operator === 'contains' && c.term);
+      const listCondition = conditions.find(c => c.operator === 'list' && c.listWords && c.listWords.length > 0);
+      
+      // Get the pattern to search
+      let searchPattern: string | null = null;
+      let searchText: string | null = null;
+      
+      if (patternCondition && patternCondition.patternType) {
+        searchPattern = patternCondition.patternType !== 'custom'
+          ? PATTERN_PRESETS[patternCondition.patternType]?.pattern || null
+          : patternCondition.customPattern || null;
+      }
+      
+      if (containsCondition && containsCondition.term) {
+        searchText = containsCondition.term;
+      }
+      
+      // If we have list condition, convert to regex pattern
+      if (listCondition && listCondition.listWords && listCondition.listWords.length > 0) {
+        const listPattern = listCondition.listWords.join('|');
+        searchPattern = searchPattern ? `(${searchPattern})|(${listPattern})` : listPattern;
+      }
+      
+      // Use RPC function for server-side regex search
+      const { data, error } = await supabase.rpc('search_psakei_din_advanced', {
+        search_pattern: searchPattern,
+        search_text: searchText,
+        result_limit: limit
+      });
+      
+      if (error) {
+        console.error('RPC search error:', error);
+        // Fallback to regular query
+        const { data: fallbackData, error: fallbackError } = await supabase
+          .from('psakei_din')
+          .select('id, title, court, year, case_number, summary, created_at')
+          .limit(limit);
+        
+        if (fallbackError) throw fallbackError;
+        return (fallbackData as PsakDin[]) || [];
+      }
+      
+      // Map RPC results to PsakDin format
+      return (data || []).map((item: { id: string; title: string; court: string; year: number; case_number: string; summary: string; matched_text?: string; match_count?: number }) => ({
+        id: item.id,
+        title: item.title,
+        court: item.court,
+        year: item.year,
+        case_number: item.case_number,
+        summary: item.summary,
+        // Add matched info for highlighting
+        _matchedText: item.matched_text,
+        _matchCount: item.match_count
+      })) as PsakDin[];
+      
+    } catch (error) {
+      console.error('Advanced server search error:', error);
       return [];
     }
   }, []);
@@ -777,6 +1158,214 @@ export function SmartSearchPage() {
       description: `${selected.length} פסקי דין נוספו לטקסט`,
     });
   }, [psakeiDin, selectedPsakim]);
+
+  // ===== IndexedDB Pre-indexing Functions =====
+  
+  // Load local index on mount
+  useEffect(() => {
+    const loadLocalIndex = async () => {
+      try {
+        const valid = await isIndexValid(24); // Valid for 24 hours
+        if (valid) {
+          const index = await loadSearchIndex();
+          const meta = await getIndexMetadata();
+          if (index && meta) {
+            setLocalIndex(index);
+            setIndexMeta(meta);
+            console.log('✅ Loaded local search index:', meta);
+          }
+        }
+      } catch (error) {
+        console.error('Error loading local index:', error);
+      }
+    };
+    loadLocalIndex();
+  }, []);
+
+  // Build local index from psakim
+  const buildLocalIndex = useCallback(async () => {
+    if (psakeiDin.length === 0) {
+      toast({ title: 'אין פסקי דין לאינדוקס', variant: 'destructive' });
+      return;
+    }
+
+    setIsIndexBuilding(true);
+    setIndexBuildProgress({ current: 0, total: psakeiDin.length });
+
+    try {
+      toast({
+        title: 'בונה אינדקס חיפוש מקומי...',
+        description: `מעבד ${psakeiDin.length} פסקי דין`,
+      });
+
+      await buildSearchIndex(psakeiDin, (current, total) => {
+        setIndexBuildProgress({ current, total });
+      });
+
+      // Reload the index
+      const index = await loadSearchIndex();
+      const meta = await getIndexMetadata();
+      if (index && meta) {
+        setLocalIndex(index);
+        setIndexMeta(meta);
+      }
+
+      toast({
+        title: '✅ האינדקס נבנה בהצלחה!',
+        description: `${psakeiDin.length} פסקים מוכנים לחיפוש מיידי`,
+      });
+    } catch (error) {
+      console.error('Error building local index:', error);
+      toast({
+        title: 'שגיאה בבניית האינדקס',
+        description: String(error),
+        variant: 'destructive',
+      });
+    } finally {
+      setIsIndexBuilding(false);
+    }
+  }, [psakeiDin]);
+
+  // Clear local index
+  const clearLocalIndex = useCallback(async () => {
+    try {
+      await clearSearchIndex();
+      setLocalIndex(null);
+      setIndexMeta(null);
+      toast({ title: 'האינדקס נמחק' });
+    } catch (error) {
+      console.error('Error clearing index:', error);
+    }
+  }, []);
+
+  // Instant search using local index - with context!
+  const instantSearch = useCallback(async (query: string): Promise<SearchResult[]> => {
+    if (!localIndex || !query.trim()) return [];
+
+    // Use the new searchWithContext for better results
+    const contextResults = await searchWithContext(query, localIndex, 100, 3);
+    
+    // Convert to SearchResult format - one result per match with context
+    const searchResults: SearchResult[] = [];
+    
+    for (const psak of contextResults) {
+      for (const match of psak.matches) {
+        searchResults.push({
+          id: crypto.randomUUID(),
+          text: match.matchedLine,
+          lineNumber: match.lineNumber,
+          matchedTerms: [query],
+          score: psak.score,
+          highlights: [],
+          sourceType: 'psak' as const,
+          psakId: psak.id,
+          psakTitle: psak.title,
+          psakCourt: psak.court,
+          psakYear: psak.year,
+          // Add context
+          contextBefore: match.lineBefore,
+          contextAfter: match.lineAfter,
+          highlightedText: match.highlightedLine,
+        });
+      }
+    }
+    
+    return searchResults;
+  }, [localIndex]);
+
+  // ===== Streaming Search with Web Worker =====
+  
+  // Initialize streaming search worker
+  useEffect(() => {
+    if (typeof Worker !== 'undefined') {
+      searchWorkerRef.current = new Worker(
+        new URL('../workers/searchWorker.ts', import.meta.url),
+        { type: 'module' }
+      );
+
+      searchWorkerRef.current.onmessage = (e) => {
+        const { type, payload } = e.data;
+        
+        if (type === 'SEARCH_BATCH') {
+          // Add new batch results to streaming results
+          setStreamingResults(prev => [...prev, ...payload.results.map((r: { psakId: string; psakTitle: string; psakCourt: string; psakYear: number; text: string; lineNumber: number; score: number; matchedTerms: string[]; contextBefore?: string; contextAfter?: string }) => ({
+            id: crypto.randomUUID(),
+            text: r.text,
+            lineNumber: r.lineNumber,
+            matchedTerms: r.matchedTerms,
+            score: r.score,
+            highlights: [],
+            sourceType: 'psak' as const,
+            psakId: r.psakId,
+            psakTitle: r.psakTitle,
+            psakCourt: r.psakCourt,
+            psakYear: r.psakYear,
+            contextBefore: r.contextBefore,
+            contextAfter: r.contextAfter,
+          }))]);
+          
+          // Update progress
+          setSearchProgress({
+            current: payload.processed,
+            total: payload.total,
+            percentage: payload.percentage,
+            isActive: !payload.isFinal,
+          });
+        }
+        
+        if (type === 'SEARCH_COMPLETE') {
+          setIsSearching(false);
+          setSearchProgress({ current: 0, total: 0, percentage: 0, isActive: false });
+          
+          toast({
+            title: 'החיפוש הושלם',
+            description: `נמצאו ${payload.totalFound} תוצאות ב-${Math.round(payload.searchTime)}ms`,
+          });
+        }
+      };
+    }
+
+    return () => {
+      searchWorkerRef.current?.terminate();
+    };
+  }, []);
+
+  // Perform streaming search
+  const performStreamingSearch = useCallback(async (psakimList: PsakDin[], queryTerms: string[]) => {
+    if (!searchWorkerRef.current || psakimList.length === 0) return;
+    
+    setStreamingResults([]); // Clear previous results
+    setResults([]); // Clear main results
+    setIsSearching(true);
+    setSearchProgress({ current: 0, total: psakimList.length, percentage: 0, isActive: true });
+    
+    // Send to worker for streaming search
+    searchWorkerRef.current.postMessage({
+      type: 'SEARCH_STREAMING',
+      payload: {
+        psakim: psakimList,
+        query: queryTerms.join(' '),
+        options: {
+          fuzzySearch: advancedSearchOptions.fuzzySearch,
+          useRoots: advancedSearchOptions.useRoots,
+          useSynonyms: advancedSearchOptions.useSynonyms,
+          removeNikud: true,
+          matchSofitLetters: true,
+          maxFuzzyDistance: 2,
+        },
+        batchSize: 50,
+      },
+    });
+  }, [advancedSearchOptions]);
+
+  // Update main results from streaming results when search completes
+  useEffect(() => {
+    if (!searchProgress.isActive && streamingResults.length > 0) {
+      // Sort by score and set as main results
+      const sorted = [...streamingResults].sort((a, b) => b.score - a.score);
+      setResults(sorted);
+    }
+  }, [searchProgress.isActive, streamingResults]);
 
   // Filter psakim by search term
   const filteredPsakim = psakimSearchTerm
@@ -993,10 +1582,28 @@ export function SmartSearchPage() {
 
   // Perform search
   const performSearch = useCallback(async () => {
-    if (conditions.length === 0) {
+    // Check if we have any valid search conditions
+    const hasPatternCondition = conditions.some(c => c.operator === 'pattern');
+    const hasTermCondition = conditions.some(c => c.term && c.term.trim().length > 0);
+    const hasListCondition = conditions.some(c => c.operator === 'list' && c.listWords && c.listWords.length > 0);
+    const hasNearCondition = conditions.some(c => c.operator === 'near' && (c.term || c.nearWord));
+    
+    const hasValidCondition = hasPatternCondition || hasTermCondition || hasListCondition || hasNearCondition;
+    
+    if (conditions.length === 0 && !inputText.trim()) {
       toast({
         title: 'שגיאה',
         description: 'יש להזין לפחות תנאי חיפוש אחד',
+        variant: 'destructive',
+      });
+      return;
+    }
+    
+    // If conditions exist but none have actual search criteria
+    if (conditions.length > 0 && !hasValidCondition) {
+      toast({
+        title: 'שגיאה', 
+        description: 'יש למלא לפחות תנאי חיפוש אחד (מילה, דפוס, או רשימה)',
         variant: 'destructive',
       });
       return;
@@ -1028,6 +1635,139 @@ export function SmartSearchPage() {
     setIsSearching(true);
     
     try {
+      // Get search terms from conditions
+      const conditionTerms = conditions
+        .filter(c => c.term && c.term.trim())
+        .map(c => c.term.trim());
+      
+      // Extract words from pattern conditions (like masechet names)
+      const patternTerms: string[] = [];
+      for (const c of conditions) {
+        if (c.operator === 'pattern' && c.patternType) {
+          const preset = PATTERN_PRESETS[c.patternType];
+          if (preset && preset.pattern) {
+            // Extract Hebrew words from patterns like "(ברכות|שבת|עירובין|...)"
+            const hebrewWords = preset.pattern.match(/[\u0590-\u05FF"]+/g);
+            if (hebrewWords) {
+              // Filter out short words (likely regex chars) and add valid words
+              for (const word of hebrewWords) {
+                if (word.length >= 2 && !patternTerms.includes(word)) {
+                  patternTerms.push(word);
+                }
+              }
+            }
+          }
+          // Also check custom pattern
+          if (c.customPattern) {
+            const customWords = c.customPattern.match(/[\u0590-\u05FF"]+/g);
+            if (customWords) {
+              for (const word of customWords) {
+                if (word.length >= 2 && !patternTerms.includes(word)) {
+                  patternTerms.push(word);
+                }
+              }
+            }
+          }
+        }
+      }
+      
+      // Combine condition terms with inputText and pattern terms
+      const searchTerms: string[] = [...conditionTerms, ...patternTerms];
+      if (inputText.trim() && !searchTerms.includes(inputText.trim())) {
+        searchTerms.push(inputText.trim());
+      }
+      
+      console.log('🔍 Search started:', { 
+        localIndex: !!localIndex, 
+        useLocalIndex: advancedSearchOptions.useLocalIndex,
+        hasTermCondition,
+        searchTerms,
+        patternTerms,
+        inputText: inputText.trim(),
+        conditions: conditions.map(c => ({ term: c.term, operator: c.operator, patternType: c.patternType })),
+      });
+
+      // If no search terms at all, show error
+      if (searchTerms.length === 0) {
+        toast({
+          title: 'אנא הזן מילת חיפוש',
+          description: 'יש להקליד מילה בשדה החיפוש או להוסיף תנאי עם מילת חיפוש',
+          variant: 'destructive',
+        });
+        setIsSearching(false);
+        return;
+      }
+
+      // ====== OPTION 1: Instant search using local IndexedDB index ======
+      if (advancedSearchOptions.useLocalIndex && localIndex && searchTerms.length > 0) {
+        console.log('⚡ Using instant search with local index');
+        
+        toast({
+          title: '⚡ חיפוש מיידי...',
+          description: 'משתמש באינדקס מקומי',
+        });
+        
+        const instantResults = await instantSearch(searchTerms.join(' '));
+        console.log('⚡ Instant search results:', instantResults.length);
+        
+        if (instantResults.length > 0) {
+          setResults(instantResults);
+          
+          // Add to history
+          setSearchHistory(prev => [{
+            id: crypto.randomUUID(),
+            query: searchTerms.join(', '),
+            timestamp: new Date(),
+            resultsCount: instantResults.length,
+            conditions: [...conditions],
+          }, ...prev.slice(0, 49)]);
+          
+          toast({
+            title: '⚡ חיפוש מיידי הושלם!',
+            description: `נמצאו ${instantResults.length} תוצאות`,
+          });
+          
+          setIsSearching(false);
+          return;
+        } else {
+          console.log('⚠️ No results from instant search, falling back...');
+        }
+      }
+
+      // ====== OPTION 2: Streaming search with Web Worker ======
+      if (useStreamingSearch && searchScope === 'all' && searchTerms.length > 0) {
+        console.log('🔄 Using streaming search');
+        
+        // Get psakim to search
+        let psakimList: PsakDin[] = [];
+        
+        if (psakeiDin.length > 0) {
+          psakimList = psakeiDin;
+        } else {
+          // Load from server with limit
+          const searchLimitNum = searchLimit === 'all' ? 1000 : Math.min(searchLimit, 1000);
+          toast({
+            title: 'טוען פסקי דין...',
+            description: `טוען עד ${searchLimitNum} פסקים לחיפוש`,
+          });
+          
+          const { data } = await supabase
+            .from('psakei_din')
+            .select('id, title, court, year, case_number, summary, full_text')
+            .order('created_at', { ascending: false })
+            .limit(searchLimitNum);
+          
+          psakimList = (data as PsakDin[]) || [];
+        }
+        
+        if (psakimList.length > 0) {
+          performStreamingSearch(psakimList, searchTerms);
+          return; // Streaming handles its own completion
+        }
+      }
+
+      // ====== OPTION 3: Regular batch search (fallback) ======
+      console.log('📋 Using regular batch search');
       const searchResults: SearchResult[] = [];
       
       // Helper to generate search variations
@@ -1306,23 +2046,97 @@ export function SmartSearchPage() {
         const serverResults = await searchPsakeiDinOnServer(conditions[0].term);
         psakimToSearch = serverResults;
       } else if (searchScope === 'all') {
-        // For complex searches, use loaded psakim
-        psakimToSearch = psakeiDin;
+        // For complex searches, use server-side search with limit to prevent memory issues
+        const searchLimitNum = searchLimit === 'all' ? 500 : Math.min(searchLimit, 500);
+        
+        toast({
+          title: 'מחפש בשרת...',
+          description: `מוגבל ל-${searchLimitNum} תוצאות למניעת עומס`,
+        });
+        
+        // Try to use server-side search first
+        const serverResults = await searchPsakeiDinAdvanced(conditions, searchLimitNum);
+        
+        if (serverResults.length > 0) {
+          psakimToSearch = serverResults;
+        } else if (psakeiDin.length > 0) {
+          // Fallback to local psakim if already loaded
+          psakimToSearch = psakeiDin.slice(0, searchLimitNum);
+        } else {
+          // Load limited psakim from server
+          toast({
+            title: 'טוען פסקי דין...',
+            description: `טוען עד ${searchLimitNum} פסקים`,
+          });
+          
+          const { data, error } = await supabase
+            .from('psakei_din')
+            .select('id, title, court, year, case_number, summary, created_at')
+            .order('created_at', { ascending: false })
+            .limit(searchLimitNum);
+          
+          if (error) {
+            toast({
+              title: 'שגיאה בטעינת פסקים',
+              description: error.message,
+              variant: 'destructive',
+            });
+            return;
+          }
+          
+          psakimToSearch = (data as PsakDin[]) || [];
+          toast({
+            title: 'נטענו פסקי דין',
+            description: `${psakimToSearch.length} פסקי דין`,
+          });
+        }
       } else if (searchScope === 'selected' && selectedPsakim.length > 0) {
         psakimToSearch = psakeiDin.filter(p => selectedPsakim.includes(p.id));
       }
       
-      // Search in psakei din
-      for (const psak of psakimToSearch) {
-        const textToSearch = psak.full_text || psak.summary;
-        if (textToSearch) {
-          searchInText(textToSearch, 'psak', {
-            id: psak.id,
-            title: psak.title,
-            court: psak.court,
-            year: psak.year,
-          });
-        }
+      // Apply search limit
+      const limitedPsakim = searchLimit === 'all' 
+        ? psakimToSearch 
+        : psakimToSearch.slice(0, searchLimit);
+      
+      const totalToSearch = limitedPsakim.length;
+      setSearchProgress({ current: 0, total: totalToSearch, percentage: 0, isActive: true });
+      
+      // Parallel batch processing for faster search
+      const BATCH_SIZE = 50; // Process 50 psakim at a time
+      const batches: PsakDin[][] = [];
+      for (let i = 0; i < limitedPsakim.length; i += BATCH_SIZE) {
+        batches.push(limitedPsakim.slice(i, i + BATCH_SIZE));
+      }
+      
+      let processedCount = 0;
+      
+      // Process batches with parallel execution within each batch
+      for (const batch of batches) {
+        // Use Promise.all for parallel processing within batch
+        await Promise.all(batch.map(async (psak) => {
+          const textToSearch = psak.full_text || psak.summary;
+          if (textToSearch) {
+            searchInText(textToSearch, 'psak', {
+              id: psak.id,
+              title: psak.title,
+              court: psak.court,
+              year: psak.year,
+            });
+          }
+        }));
+        
+        processedCount += batch.length;
+        const percentage = Math.round((processedCount / totalToSearch) * 100);
+        setSearchProgress({ 
+          current: processedCount, 
+          total: totalToSearch, 
+          percentage, 
+          isActive: true 
+        });
+        
+        // Small yield to keep UI responsive
+        await new Promise(resolve => setTimeout(resolve, 0));
       }
       
       // Search in custom text if enabled
@@ -1373,7 +2187,7 @@ export function SmartSearchPage() {
       
       toast({
         title: 'החיפוש הושלם',
-        description: `נמצאו ${filteredResults.length} תוצאות${psakimToSearch.length > 0 ? ` ב-${psakimToSearch.length} פסקי דין` : ''}`,
+        description: `נמצאו ${filteredResults.length} תוצאות${totalToSearch > 0 ? ` ב-${totalToSearch} פסקי דין` : ''}${searchLimit !== 'all' ? ` (מוגבל ל-${searchLimit})` : ''}`,
       });
     } catch (error) {
       toast({
@@ -1383,8 +2197,9 @@ export function SmartSearchPage() {
       });
     } finally {
       setIsSearching(false);
+      setSearchProgress({ current: 0, total: 0, percentage: 0, isActive: false });
     }
-  }, [inputText, conditions, filterRules, positionRules, psakeiDin, searchScope, selectedPsakim, includeInputText, searchPsakeiDinOnServer]);
+  }, [inputText, conditions, filterRules, positionRules, psakeiDin, searchScope, selectedPsakim, includeInputText, searchPsakeiDinOnServer, searchPsakeiDinAdvanced, searchLimit]);
 
   // Run validation
   const runValidation = useCallback(() => {
@@ -1455,6 +2270,48 @@ export function SmartSearchPage() {
       <div className="min-h-screen bg-white p-4 md:p-6" dir="rtl">
         <div className="max-w-full mx-auto space-y-4">
           
+          {/* Database Count Card */}
+          <Card className="border-2 border-[#b8860b]/30 bg-gradient-to-r from-[#b8860b]/5 to-[#1e3a5f]/5 shadow-sm">
+            <CardContent className="py-4">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-4">
+                  <div className="p-3 rounded-full bg-[#b8860b]/10">
+                    <Database className="w-6 h-6 text-[#b8860b]" />
+                  </div>
+                  <div>
+                    <p className="text-sm text-[#1e3a5f]/60">סה"כ פסקי דין במאגר</p>
+                    <p className="text-3xl font-bold text-[#1e3a5f]">
+                      {isLoadingPsakim ? (
+                        <Loader2 className="w-6 h-6 animate-spin text-[#b8860b]" />
+                      ) : (
+                        psakeiDin.length.toLocaleString('he-IL')
+                      )}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-3">
+                  <Badge className="bg-white text-[#1e3a5f] border border-[#b8860b]">
+                    💾 נתונים מקומיים
+                  </Badge>
+                  <Button 
+                    variant="outline" 
+                    size="sm" 
+                    onClick={loadPsakeiDin} 
+                    disabled={isLoadingPsakim}
+                    className="border-[#b8860b] text-[#1e3a5f] hover:bg-[#b8860b]/10 gap-2"
+                  >
+                    {isLoadingPsakim ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <RefreshCw className="h-4 w-4" />
+                    )}
+                    עדכן
+                  </Button>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+
           {/* Compact Header */}
           <div className="flex items-center justify-between bg-white border border-[#b8860b] rounded-lg p-3 shadow-sm">
             <div className="flex items-center gap-3">
@@ -1463,22 +2320,7 @@ export function SmartSearchPage() {
               </div>
               <div>
                 <h1 className="text-xl font-bold text-[#1e3a5f]">חיפוש חכם בפסקי דין</h1>
-                <p className="text-xs text-[#1e3a5f]/60">{psakeiDin.length} פסקי דין במערכת</p>
               </div>
-            </div>
-            <div className="flex items-center gap-2">
-              <Badge className="bg-white text-[#1e3a5f] border border-[#b8860b]">
-                💾 נתונים מקומיים
-              </Badge>
-              <Button 
-                variant="outline" 
-                size="sm" 
-                onClick={loadPsakeiDin} 
-                disabled={isLoadingPsakim}
-                className="border-[#b8860b] text-[#1e3a5f] hover:bg-white"
-              >
-                <RefreshCw className={cn("h-4 w-4", isLoadingPsakim && "animate-spin")} />
-              </Button>
             </div>
           </div>
 
@@ -1491,7 +2333,7 @@ export function SmartSearchPage() {
                   <div className="flex-1 relative">
                     <Search className="absolute right-4 top-1/2 -translate-y-1/2 h-6 w-6 text-[#b8860b]" />
                     <Input
-                      placeholder="הקלד כאן את מילות החיפוש..."
+                      placeholder="הקלד כאן את מילות החיפוש (או השתמש בבנאי למטה)..."
                       className="pr-12 h-14 text-lg border border-[#b8860b] focus:border-[#b8860b] bg-white text-[#1e3a5f] placeholder:text-[#1e3a5f]/40 rounded-lg"
                       value={conditions[0]?.term || ''}
                       onChange={(e) => {
@@ -1503,16 +2345,29 @@ export function SmartSearchPage() {
                         }
                       }}
                       onKeyDown={(e) => {
-                        if (e.key === 'Enter' && conditions[0]?.term) {
+                        if (e.key === 'Enter' && (conditions[0]?.term || conditions.some(c => c.operator === 'pattern'))) {
                           performSearch();
                         }
                       }}
                     />
+                    {/* Clear button for main search input */}
+                    {conditions[0]?.term && (
+                      <button
+                        onClick={() => {
+                          if (conditions[0]) {
+                            updateCondition(conditions[0].id, { term: '' });
+                          }
+                        }}
+                        className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400 hover:text-red-500"
+                      >
+                        <X className="h-5 w-5" />
+                      </button>
+                    )}
                   </div>
                   <Button 
                     size="lg"
                     onClick={performSearch}
-                    disabled={isSearching || (!conditions[0]?.term && !inputText)}
+                    disabled={isSearching || (conditions.length === 0 && !inputText)}
                     className="h-14 px-8 bg-[#b8860b] hover:bg-[#996d00] text-white font-bold text-lg shadow-md"
                   >
                     {isSearching ? (
@@ -1561,6 +2416,28 @@ export function SmartSearchPage() {
                     </Button>
                   </div>
                   
+                  {/* Search Limit Selector */}
+                  <Separator orientation="vertical" className="h-6 mx-2" />
+                  <span className="text-sm font-bold text-[#1e3a5f]">הגבל ל:</span>
+                  <div className="flex gap-1 flex-wrap">
+                    {[100, 500, 1000, 2000, 5000, 'all' as const].map((limit) => (
+                      <Button
+                        key={limit}
+                        variant={searchLimit === limit ? 'default' : 'outline'}
+                        size="sm"
+                        className={cn(
+                          "min-w-[60px] text-xs",
+                          searchLimit === limit 
+                            ? "bg-[#1e3a5f] hover:bg-[#2a4a7f] text-white" 
+                            : "border-[#1e3a5f]/30 text-[#1e3a5f] hover:bg-[#1e3a5f]/10"
+                        )}
+                        onClick={() => setSearchLimit(limit)}
+                      >
+                        {limit === 'all' ? 'הכל' : limit}
+                      </Button>
+                    ))}
+                  </div>
+                  
                   {/* Quick Stats */}
                   <div className="mr-auto flex items-center gap-3 text-xs text-[#1e3a5f]/60">
                     {results.length > 0 && (
@@ -1570,6 +2447,440 @@ export function SmartSearchPage() {
                     )}
                   </div>
                 </div>
+                
+                {/* Search Progress Indicator */}
+                {searchProgress.isActive && (
+                  <div className="p-3 bg-white rounded-lg border border-[#b8860b]">
+                    <div className="flex items-center gap-3 mb-2">
+                      <Loader2 className="h-4 w-4 animate-spin text-[#b8860b]" />
+                      <span className="text-sm font-bold text-[#1e3a5f]">
+                        מחפש... {searchProgress.current}/{searchProgress.total} פסקי דין ({searchProgress.percentage}%)
+                      </span>
+                    </div>
+                    <Progress value={searchProgress.percentage} className="h-2" />
+                  </div>
+                )}
+
+                {/* Advanced Search Options - Collapsible */}
+                <Collapsible defaultOpen={false}>
+                  <CollapsibleTrigger asChild>
+                    <div className="flex items-center justify-between p-3 bg-gradient-to-r from-purple-50 to-blue-50 rounded-lg border border-purple-200 cursor-pointer hover:from-purple-100 hover:to-blue-100 transition-colors">
+                      <div className="flex items-center gap-3">
+                        <Brain className="h-5 w-5 text-purple-600" />
+                        <span className="text-sm font-bold text-purple-800">חיפוש חכם - אפשרויות מתקדמות</span>
+                        <div className="flex items-center gap-2">
+                          {isWorkerReady && (
+                            <Badge className="bg-green-100 text-green-700 text-xs">
+                              <Zap className="h-3 w-3 mr-1" />
+                              אינדקס פעיל
+                            </Badge>
+                          )}
+                          {isIndexing && (
+                            <Badge className="bg-yellow-100 text-yellow-700 text-xs">
+                              <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                              בונה אינדקס...
+                            </Badge>
+                          )}
+                          {indexStats && (
+                            <span className="text-xs text-purple-600">
+                              {indexStats.wordCount.toLocaleString()} מילים | {indexStats.psakimCount} פסקים
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                      <ChevronDown className="h-4 w-4 text-purple-600 transition-transform duration-200" />
+                    </div>
+                  </CollapsibleTrigger>
+                  <CollapsibleContent>
+                    <div className="mt-2 p-4 bg-white rounded-lg border border-purple-200">
+                      {/* Select All / Deselect All Buttons */}
+                      <div className="flex items-center gap-2 mb-4 pb-3 border-b border-purple-100">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="text-xs gap-1 border-green-300 text-green-700 hover:bg-green-50"
+                          onClick={() => setAdvancedSearchOptions(prev => ({
+                            ...prev,
+                            useWorker: true,
+                            useServerFTS: true,
+                            fuzzySearch: true,
+                            useRoots: true,
+                            useSynonyms: true,
+                            useCache: true,
+                            expandAcronyms: true,
+                            phoneticSearch: true,
+                            ocrCorrection: true,
+                            useNgrams: true,
+                            removeStopWords: true,
+                            useLocalIndex: true,
+                          }))}
+                        >
+                          <CheckSquare className="h-3 w-3" />
+                          בחר הכל
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="text-xs gap-1 border-red-300 text-red-700 hover:bg-red-50"
+                          onClick={() => setAdvancedSearchOptions(prev => ({
+                            ...prev,
+                            useWorker: false,
+                            useServerFTS: false,
+                            fuzzySearch: false,
+                            useRoots: false,
+                            useSynonyms: false,
+                            useCache: false,
+                            expandAcronyms: false,
+                            phoneticSearch: false,
+                            ocrCorrection: false,
+                            useNgrams: false,
+                            removeStopWords: false,
+                            useLocalIndex: false,
+                          }))}
+                        >
+                          <Square className="h-3 w-3" />
+                          בטל הכל
+                        </Button>
+                      </div>
+                      <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+                        {/* Worker Search */}
+                        <div className="flex items-center gap-2">
+                          <Checkbox
+                            id="useWorker"
+                            checked={advancedSearchOptions.useWorker}
+                            onCheckedChange={(checked) => 
+                              setAdvancedSearchOptions(prev => ({ ...prev, useWorker: !!checked }))
+                            }
+                          />
+                          <Label htmlFor="useWorker" className="text-sm cursor-pointer">
+                            <Zap className="h-3 w-3 inline mr-1 text-yellow-500" />
+                            חיפוש מקבילי (Worker)
+                          </Label>
+                        </div>
+                        
+                        {/* Server FTS */}
+                        <div className="flex items-center gap-2">
+                          <Checkbox
+                            id="useServerFTS"
+                            checked={advancedSearchOptions.useServerFTS}
+                            onCheckedChange={(checked) => 
+                              setAdvancedSearchOptions(prev => ({ ...prev, useServerFTS: !!checked }))
+                            }
+                          />
+                          <Label htmlFor="useServerFTS" className="text-sm cursor-pointer">
+                            <Database className="h-3 w-3 inline mr-1 text-blue-500" />
+                            חיפוש בשרת (FTS)
+                          </Label>
+                        </div>
+                        
+                        {/* Fuzzy Search */}
+                        <div className="flex items-center gap-2">
+                          <Checkbox
+                            id="fuzzySearch"
+                            checked={advancedSearchOptions.fuzzySearch}
+                            onCheckedChange={(checked) => 
+                              setAdvancedSearchOptions(prev => ({ ...prev, fuzzySearch: !!checked }))
+                            }
+                          />
+                          <Label htmlFor="fuzzySearch" className="text-sm cursor-pointer">
+                            <Sparkles className="h-3 w-3 inline mr-1 text-purple-500" />
+                            חיפוש מטושטש (Fuzzy)
+                          </Label>
+                        </div>
+                        
+                        {/* Hebrew Roots */}
+                        <div className="flex items-center gap-2">
+                          <Checkbox
+                            id="useRoots"
+                            checked={advancedSearchOptions.useRoots}
+                            onCheckedChange={(checked) => 
+                              setAdvancedSearchOptions(prev => ({ ...prev, useRoots: !!checked }))
+                            }
+                          />
+                          <Label htmlFor="useRoots" className="text-sm cursor-pointer">
+                            <span className="font-hebrew text-xs mr-1">שרש</span>
+                            חיפוש לפי שורש עברי
+                          </Label>
+                        </div>
+                        
+                        {/* Synonyms */}
+                        <div className="flex items-center gap-2">
+                          <Checkbox
+                            id="useSynonyms"
+                            checked={advancedSearchOptions.useSynonyms}
+                            onCheckedChange={(checked) => 
+                              setAdvancedSearchOptions(prev => ({ ...prev, useSynonyms: !!checked }))
+                            }
+                          />
+                          <Label htmlFor="useSynonyms" className="text-sm cursor-pointer">
+                            <ArrowLeftRight className="h-3 w-3 inline mr-1 text-green-500" />
+                            מילים נרדפות
+                          </Label>
+                        </div>
+                        
+                        {/* Cache */}
+                        <div className="flex items-center gap-2">
+                          <Checkbox
+                            id="useCache"
+                            checked={advancedSearchOptions.useCache}
+                            onCheckedChange={(checked) => 
+                              setAdvancedSearchOptions(prev => ({ ...prev, useCache: !!checked }))
+                            }
+                          />
+                          <Label htmlFor="useCache" className="text-sm cursor-pointer">
+                            <Clock className="h-3 w-3 inline mr-1 text-orange-500" />
+                            שמור בזיכרון (Cache)
+                          </Label>
+                        </div>
+                        
+                        {/* Expand Acronyms */}
+                        <div className="flex items-center gap-2">
+                          <Checkbox
+                            id="expandAcronyms"
+                            checked={advancedSearchOptions.expandAcronyms}
+                            onCheckedChange={(checked) => 
+                              setAdvancedSearchOptions(prev => ({ ...prev, expandAcronyms: !!checked }))
+                            }
+                          />
+                          <Label htmlFor="expandAcronyms" className="text-sm cursor-pointer">
+                            <span className="font-bold text-xs mr-1">ר"ת</span>
+                            הרחבת ראשי תיבות
+                          </Label>
+                        </div>
+                        
+                        {/* Phonetic Search */}
+                        <div className="flex items-center gap-2">
+                          <Checkbox
+                            id="phoneticSearch"
+                            checked={advancedSearchOptions.phoneticSearch}
+                            onCheckedChange={(checked) => 
+                              setAdvancedSearchOptions(prev => ({ ...prev, phoneticSearch: !!checked }))
+                            }
+                          />
+                          <Label htmlFor="phoneticSearch" className="text-sm cursor-pointer">
+                            🔊 חיפוש פונטי (לפי צליל)
+                          </Label>
+                        </div>
+                        
+                        {/* OCR Correction */}
+                        <div className="flex items-center gap-2">
+                          <Checkbox
+                            id="ocrCorrection"
+                            checked={advancedSearchOptions.ocrCorrection}
+                            onCheckedChange={(checked) => 
+                              setAdvancedSearchOptions(prev => ({ ...prev, ocrCorrection: !!checked }))
+                            }
+                          />
+                          <Label htmlFor="ocrCorrection" className="text-sm cursor-pointer">
+                            📄 תיקון שגיאות סריקה (OCR)
+                          </Label>
+                        </div>
+                        
+                        {/* N-grams */}
+                        <div className="flex items-center gap-2">
+                          <Checkbox
+                            id="useNgrams"
+                            checked={advancedSearchOptions.useNgrams}
+                            onCheckedChange={(checked) => 
+                              setAdvancedSearchOptions(prev => ({ ...prev, useNgrams: !!checked }))
+                            }
+                          />
+                          <Label htmlFor="useNgrams" className="text-sm cursor-pointer">
+                            🔤 חיפוש חלקי (N-gram)
+                          </Label>
+                        </div>
+                        
+                        {/* Stop Words */}
+                        <div className="flex items-center gap-2">
+                          <Checkbox
+                            id="removeStopWords"
+                            checked={advancedSearchOptions.removeStopWords}
+                            onCheckedChange={(checked) => 
+                              setAdvancedSearchOptions(prev => ({ ...prev, removeStopWords: !!checked }))
+                            }
+                          />
+                          <Label htmlFor="removeStopWords" className="text-sm cursor-pointer">
+                            🚫 התעלם ממילות קישור
+                          </Label>
+                        </div>
+                      </div>
+                      
+                      {/* Advanced Sliders */}
+                      <div className="mt-4 pt-4 border-t border-purple-100 grid grid-cols-1 md:grid-cols-3 gap-4">
+                        {/* Fuzzy Threshold */}
+                        <div className="space-y-2">
+                          <Label className="text-xs text-purple-700">
+                            רגישות חיפוש מטושטש: {(advancedSearchOptions.fuzzyThreshold * 100).toFixed(0)}%
+                          </Label>
+                          <input
+                            type="range"
+                            min="50"
+                            max="100"
+                            value={advancedSearchOptions.fuzzyThreshold * 100}
+                            onChange={(e) => setAdvancedSearchOptions(prev => ({
+                              ...prev,
+                              fuzzyThreshold: parseInt(e.target.value) / 100
+                            }))}
+                            className="w-full h-2 bg-purple-200 rounded-lg appearance-none cursor-pointer"
+                          />
+                        </div>
+                        
+                        {/* Title Boost */}
+                        <div className="space-y-2">
+                          <Label className="text-xs text-purple-700">
+                            הגברת התאמה בכותרת: x{advancedSearchOptions.boostTitle.toFixed(1)}
+                          </Label>
+                          <input
+                            type="range"
+                            min="10"
+                            max="50"
+                            value={advancedSearchOptions.boostTitle * 10}
+                            onChange={(e) => setAdvancedSearchOptions(prev => ({
+                              ...prev,
+                              boostTitle: parseInt(e.target.value) / 10
+                            }))}
+                            className="w-full h-2 bg-purple-200 rounded-lg appearance-none cursor-pointer"
+                          />
+                        </div>
+                        
+                        {/* Exact Match Boost */}
+                        <div className="space-y-2">
+                          <Label className="text-xs text-purple-700">
+                            הגברת התאמה מדויקת: x{advancedSearchOptions.boostExactMatch.toFixed(1)}
+                          </Label>
+                          <input
+                            type="range"
+                            min="10"
+                            max="50"
+                            value={advancedSearchOptions.boostExactMatch * 10}
+                            onChange={(e) => setAdvancedSearchOptions(prev => ({
+                              ...prev,
+                              boostExactMatch: parseInt(e.target.value) / 10
+                            }))}
+                            className="w-full h-2 bg-purple-200 rounded-lg appearance-none cursor-pointer"
+                          />
+                        </div>
+                      </div>
+                      
+                      {/* Index Status */}
+                      {indexStats && (
+                        <div className="mt-4 pt-4 border-t border-purple-100">
+                          <div className="flex items-center gap-4 text-xs text-purple-600">
+                            <span>
+                              <strong>אינדקס:</strong> {indexStats.wordCount.toLocaleString()} מילים ייחודיות
+                            </span>
+                            <span>
+                              <strong>פסקים:</strong> {indexStats.psakimCount}
+                            </span>
+                            <span>
+                              <strong>סה"כ מילים:</strong> {indexStats.totalWords.toLocaleString()}
+                            </span>
+                            <span>
+                              <strong>זמן בנייה:</strong> {indexStats.buildTime.toFixed(0)}ms
+                            </span>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Local IndexedDB Pre-indexing Section */}
+                      <div className="mt-4 pt-4 border-t border-purple-100">
+                        <div className="flex items-center justify-between mb-3">
+                          <div className="flex items-center gap-2">
+                            <HardDrive className="h-4 w-4 text-indigo-600" />
+                            <span className="text-sm font-bold text-indigo-800">אינדקס מקומי (חיפוש מיידי)</span>
+                            {localIndex && (
+                              <Badge className="bg-green-100 text-green-700 text-xs">
+                                <Check className="h-3 w-3 mr-1" />
+                                מוכן
+                              </Badge>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <Checkbox
+                              id="useLocalIndex"
+                              checked={advancedSearchOptions.useLocalIndex}
+                              onCheckedChange={(checked) => 
+                                setAdvancedSearchOptions(prev => ({ ...prev, useLocalIndex: !!checked }))
+                              }
+                            />
+                            <Label htmlFor="useLocalIndex" className="text-xs cursor-pointer">
+                              השתמש באינדקס מקומי
+                            </Label>
+                          </div>
+                        </div>
+                        
+                        {indexMeta && (
+                          <div className="mb-3 p-2 bg-indigo-50 rounded text-xs text-indigo-700">
+                            <div className="flex items-center justify-between">
+                              <span>{indexMeta.psakimCount.toLocaleString()} פסקים | {indexMeta.totalWords.toLocaleString()} מילים</span>
+                              <span>עדכון אחרון: {new Date(indexMeta.lastUpdated).toLocaleString('he-IL')}</span>
+                            </div>
+                          </div>
+                        )}
+                        
+                        {isIndexBuilding && (
+                          <div className="mb-3 p-2 bg-yellow-50 rounded border border-yellow-200">
+                            <div className="flex items-center gap-2 mb-2">
+                              <Loader2 className="h-4 w-4 animate-spin text-yellow-600" />
+                              <span className="text-sm text-yellow-800">
+                                בונה אינדקס... {indexBuildProgress.current}/{indexBuildProgress.total}
+                              </span>
+                            </div>
+                            <Progress 
+                              value={(indexBuildProgress.current / Math.max(indexBuildProgress.total, 1)) * 100} 
+                              className="h-2" 
+                            />
+                          </div>
+                        )}
+                        
+                        <div className="flex items-center gap-2">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={buildLocalIndex}
+                            disabled={isIndexBuilding || psakeiDin.length === 0}
+                            className="border-indigo-300 text-indigo-700 hover:bg-indigo-50"
+                          >
+                            {isIndexBuilding ? (
+                              <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                            ) : (
+                              <Gauge className="h-4 w-4 mr-2" />
+                            )}
+                            {localIndex ? 'עדכן אינדקס' : 'בנה אינדקס מקומי'}
+                          </Button>
+                          
+                          {localIndex && (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={clearLocalIndex}
+                              className="text-red-600 hover:bg-red-50"
+                            >
+                              <Trash2 className="h-4 w-4 mr-1" />
+                              מחק אינדקס
+                            </Button>
+                          )}
+                          
+                          <div className="flex items-center gap-2 mr-4">
+                            <Checkbox
+                              id="useStreamingSearch"
+                              checked={useStreamingSearch}
+                              onCheckedChange={(checked) => setUseStreamingSearch(!!checked)}
+                            />
+                            <Label htmlFor="useStreamingSearch" className="text-xs cursor-pointer">
+                              <RefreshCw className="h-3 w-3 inline mr-1 text-blue-500" />
+                              הצג תוצאות בזמן אמת (Streaming)
+                            </Label>
+                          </div>
+                        </div>
+                        
+                        <p className="mt-2 text-xs text-gray-500">
+                          💡 האינדקס המקומי מאפשר חיפוש מיידי ללא המתנה. נשמר בדפדפן ופעיל גם אופליין.
+                        </p>
+                      </div>
+                    </div>
+                  </CollapsibleContent>
+                </Collapsible>
 
                 {/* Query Builder - Collapsible */}
                 <Collapsible defaultOpen={false} className="mt-4">
@@ -1628,6 +2939,56 @@ export function SmartSearchPage() {
                           <p className="text-sm">לחץ "הוסף תנאי" להתחיל לבנות חיפוש</p>
                         </div>
                       )}
+                      
+                      {/* Search Actions - BIG SEARCH BUTTON */}
+                      {conditions.length > 0 && (
+                        <div className="mt-4 pt-4 border-t border-[#b8860b]/30">
+                          <div className="flex flex-wrap gap-3 items-center justify-between">
+                            {/* Search Info */}
+                            <div className="text-sm text-[#1e3a5f]/70">
+                              <span className="font-bold">{conditions.length}</span> תנאים הוגדרו | 
+                              יחפש ב-<span className="font-bold">{psakeiDin.length.toLocaleString()}</span> פסקי דין
+                            </div>
+                            
+                            {/* Action Buttons */}
+                            <div className="flex gap-2">
+                              {/* Clear All Button */}
+                              <Button
+                                variant="outline"
+                                size="lg"
+                                onClick={() => {
+                                  setConditions([]);
+                                  setResults([]);
+                                }}
+                                className="border-red-300 text-red-600 hover:bg-red-50 gap-2"
+                              >
+                                <X className="h-5 w-5" />
+                                נקה הכל
+                              </Button>
+                              
+                              {/* BIG SEARCH BUTTON */}
+                              <Button 
+                                size="lg"
+                                onClick={performSearch}
+                                disabled={isSearching || conditions.length === 0}
+                                className="h-14 px-10 bg-[#b8860b] hover:bg-[#996d00] text-white font-bold text-lg shadow-lg gap-3"
+                              >
+                                {isSearching ? (
+                                  <>
+                                    <Loader2 className="h-6 w-6 animate-spin" />
+                                    מחפש...
+                                  </>
+                                ) : (
+                                  <>
+                                    <Search className="h-6 w-6" />
+                                    🔍 חפש בכל הפסקים ({psakeiDin.length})
+                                  </>
+                                )}
+                              </Button>
+                            </div>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   </CollapsibleContent>
                 </Collapsible>
@@ -1645,6 +3006,55 @@ export function SmartSearchPage() {
                   </CollapsibleTrigger>
                   <CollapsibleContent>
                     <div className="mt-3 p-4 bg-white rounded-lg border border-[#b8860b]">
+                      {/* Select All / Deselect All Buttons */}
+                      <div className="flex items-center gap-2 mb-4 pb-3 border-b border-[#b8860b]/30">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="text-xs gap-1 border-green-300 text-green-700 hover:bg-green-50"
+                          onClick={() => setGlobalSmartOptions(prev => ({
+                            ...prev,
+                            numbersToLetters: true,
+                            wordVariations: true,
+                            ignoreNikud: true,
+                            sofitEquivalence: true,
+                            gematriaSearch: true,
+                            acronymExpansion: true,
+                            removeNikud: true,
+                            matchSofitLetters: true,
+                            matchGematria: true,
+                            expandAcronyms: true,
+                            caseInsensitive: true,
+                            wordBoundary: true,
+                          }))}
+                        >
+                          <CheckSquare className="h-3 w-3" />
+                          בחר הכל
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="text-xs gap-1 border-red-300 text-red-700 hover:bg-red-50"
+                          onClick={() => setGlobalSmartOptions(prev => ({
+                            ...prev,
+                            numbersToLetters: false,
+                            wordVariations: false,
+                            ignoreNikud: false,
+                            sofitEquivalence: false,
+                            gematriaSearch: false,
+                            acronymExpansion: false,
+                            removeNikud: false,
+                            matchSofitLetters: false,
+                            matchGematria: false,
+                            expandAcronyms: false,
+                            caseInsensitive: false,
+                            wordBoundary: false,
+                          }))}
+                        >
+                          <Square className="h-3 w-3" />
+                          בטל הכל
+                        </Button>
+                      </div>
                       <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
                         {/* מספרים ↔ אותיות */}
                         <div className="flex items-start gap-3 p-3 rounded-lg border border-[#b8860b]/50 bg-white hover:border-[#b8860b] transition-all">
@@ -1824,16 +3234,64 @@ export function SmartSearchPage() {
           {results.length > 0 && (
             <Card className="border border-[#b8860b] shadow-lg bg-white">
               <CardHeader className="pb-3 bg-white border-b border-[#b8860b]/30">
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between flex-wrap gap-2">
                   <CardTitle className="text-lg flex items-center gap-2 text-[#1e3a5f]">
                     <Check className="h-5 w-5 text-green-600" />
                     תוצאות חיפוש
                   </CardTitle>
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 flex-wrap">
                     <Badge className="bg-white text-[#1e3a5f] border border-[#b8860b]">{results.length} תוצאות</Badge>
                     <Badge variant="outline" className="border-[#b8860b] text-[#1e3a5f]">
                       {results.filter(r => r.sourceType === 'psak').length} מפסקי דין
                     </Badge>
+                    
+                    {/* Selection Actions - Always show select all button */}
+                    <Separator orientation="vertical" className="h-6 mx-1" />
+                    {selectedPsakim.length > 0 && (
+                      <Badge className="bg-[#1e3a5f] text-white">
+                        {selectedPsakim.length} נבחרו
+                      </Badge>
+                    )}
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => {
+                        // Select all unique psakim from results
+                        const uniquePsakIds = [...new Set(results.filter(r => r.psakId).map(r => r.psakId!))];
+                        setSelectedPsakim(uniquePsakIds);
+                      }}
+                      className="h-7 text-xs gap-1 border-[#b8860b] text-[#1e3a5f]"
+                    >
+                      <Check className="h-3 w-3" />
+                      בחר הכל ({[...new Set(results.filter(r => r.psakId).map(r => r.psakId!))].length})
+                    </Button>
+                    {selectedPsakim.length > 0 && (
+                      <>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => setSelectedPsakim([])}
+                          className="h-7 text-xs gap-1 border-[#b8860b] text-[#1e3a5f]"
+                        >
+                          <X className="h-3 w-3" />
+                          בטל בחירה
+                        </Button>
+                        <Button
+                          variant="destructive"
+                          size="sm"
+                          onClick={deleteSelectedPsakim}
+                          disabled={isDeletingPsakim}
+                          className="h-7 text-xs gap-1"
+                        >
+                          {isDeletingPsakim ? (
+                            <Loader2 className="h-3 w-3 animate-spin" />
+                          ) : (
+                            <Trash2 className="h-3 w-3" />
+                          )}
+                          מחק נבחרים
+                        </Button>
+                      </>
+                    )}
                     
                     {/* Display Mode Buttons */}
                     <div className="flex items-center border border-[#b8860b] rounded-lg overflow-hidden">
@@ -1888,11 +3346,55 @@ export function SmartSearchPage() {
                       {/* Source Info */}
                       {result.sourceType === 'psak' && result.psakTitle && (
                         <div className="flex items-center gap-2 mb-3 pb-2 border-b border-[#b8860b]/50 text-xs">
+                          {/* Checkbox for selection */}
+                          <Checkbox
+                            checked={result.psakId ? selectedPsakim.includes(result.psakId) : false}
+                            onCheckedChange={() => {
+                              if (result.psakId) {
+                                setSelectedPsakim(prev =>
+                                  prev.includes(result.psakId!)
+                                    ? prev.filter(id => id !== result.psakId)
+                                    : [...prev, result.psakId!]
+                                );
+                              }
+                            }}
+                            className="border-[#b8860b]"
+                            onClick={(e) => e.stopPropagation()}
+                          />
                           <Database className="h-3 w-3 text-[#b8860b]" />
                           <span className="font-bold text-[#1e3a5f]">{result.psakTitle}</span>
                           <Badge className="bg-white text-[#1e3a5f] text-xs">{result.psakCourt}</Badge>
                           <span className="text-[#1e3a5f]/60">{result.psakYear}</span>
-                          <Badge variant="outline" className="mr-auto border-[#b8860b] text-[#1e3a5f]">שורה {result.lineNumber}</Badge>
+                          <Badge variant="outline" className="border-[#b8860b] text-[#1e3a5f]">שורה {result.lineNumber}</Badge>
+                          
+                          {/* Edit & Delete Buttons */}
+                          <div className="mr-auto flex items-center gap-1">
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                const psak = psakeiDin.find(p => p.id === result.psakId);
+                                if (psak) openEditDialog(psak);
+                              }}
+                              className="h-6 w-6 p-0 text-[#1e3a5f] hover:bg-[#b8860b]/20"
+                              title="ערוך כותרת"
+                            >
+                              <Pencil className="h-3 w-3" />
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                if (result.psakId) deletePsak(result.psakId);
+                              }}
+                              className="h-6 w-6 p-0 text-red-600 hover:bg-red-100"
+                              title="מחק"
+                            >
+                              <Trash2 className="h-3 w-3" />
+                            </Button>
+                          </div>
                         </div>
                       )}
                       
@@ -1900,23 +3402,31 @@ export function SmartSearchPage() {
                       <div className="space-y-2 text-[#1e3a5f]" dir="rtl">
                         {resultsDisplayMode === 'list' && (
                           <p className="bg-white p-3 rounded-lg border-r-4 border-[#b8860b] truncate text-sm">
-                            {highlightText(result.text, result.matchedTerms)}
+                            {result.highlightedText ? (
+                              <span dangerouslySetInnerHTML={{ __html: result.highlightedText }} />
+                            ) : (
+                              highlightText(result.text, result.matchedTerms)
+                            )}
                           </p>
                         )}
                         
                         {resultsDisplayMode === 'compact' && (
                           <>
                             {result.contextBefore && (
-                              <p className="text-[#1e3a5f]/50 border-r-2 border-[#b8860b]/50 pr-3 truncate text-sm">
-                                {result.contextBefore}
+                              <p className="text-[#1e3a5f]/50 border-r-2 border-[#b8860b]/30 pr-3 text-xs italic bg-gray-50/50 py-1 rounded">
+                                ...{result.contextBefore}
                               </p>
                             )}
-                            <p className="bg-white p-3 rounded-lg border-r-4 border-[#b8860b] text-sm">
-                              {highlightText(result.text, result.matchedTerms)}
+                            <p className="bg-white p-3 rounded-lg border-r-4 border-[#b8860b] text-sm shadow-sm">
+                              {result.highlightedText ? (
+                                <span dangerouslySetInnerHTML={{ __html: result.highlightedText }} />
+                              ) : (
+                                highlightText(result.text, result.matchedTerms)
+                              )}
                             </p>
                             {result.contextAfter && (
-                              <p className="text-[#1e3a5f]/50 border-r-2 border-[#b8860b]/50 pr-3 truncate text-sm">
-                                {result.contextAfter}
+                              <p className="text-[#1e3a5f]/50 border-r-2 border-[#b8860b]/30 pr-3 text-xs italic bg-gray-50/50 py-1 rounded">
+                                {result.contextAfter}...
                               </p>
                             )}
                           </>
@@ -1925,15 +3435,21 @@ export function SmartSearchPage() {
                         {resultsDisplayMode === 'detailed' && (
                           <div className="space-y-2">
                             {result.contextBefore && (
-                              <p className="text-[#1e3a5f]/60 border-r-2 border-[#b8860b]/50 pr-3 text-sm">
+                              <p className="text-[#1e3a5f]/60 border-r-2 border-[#b8860b]/30 pr-3 text-sm bg-gray-50/50 py-2 rounded italic">
+                                <span className="text-[#b8860b] text-xs ml-2">↑ שורה קודמת:</span>
                                 {result.contextBefore}
                               </p>
                             )}
-                            <p className="bg-white p-4 rounded-lg border-r-4 border-[#b8860b] font-medium">
-                              {highlightText(result.text, result.matchedTerms)}
+                            <p className="bg-white p-4 rounded-lg border-r-4 border-[#b8860b] font-medium shadow-sm">
+                              {result.highlightedText ? (
+                                <span dangerouslySetInnerHTML={{ __html: result.highlightedText }} />
+                              ) : (
+                                highlightText(result.text, result.matchedTerms)
+                              )}
                             </p>
                             {result.contextAfter && (
-                              <p className="text-[#1e3a5f]/60 border-r-2 border-[#b8860b]/50 pr-3 text-sm">
+                              <p className="text-[#1e3a5f]/60 border-r-2 border-[#b8860b]/30 pr-3 text-sm bg-gray-50/50 py-2 rounded italic">
+                                <span className="text-[#b8860b] text-xs ml-2">↓ שורה הבאה:</span>
                                 {result.contextAfter}
                               </p>
                             )}
@@ -2088,6 +3604,21 @@ export function SmartSearchPage() {
                         <X className="h-4 w-4 ml-1" />
                         בטל בחירה
                       </Button>
+                      {/* Delete Selected Button */}
+                      <Button
+                        variant="destructive"
+                        size="sm"
+                        onClick={deleteSelectedPsakim}
+                        disabled={selectedPsakim.length === 0 || isDeletingPsakim}
+                        className="gap-1"
+                      >
+                        {isDeletingPsakim ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <Trash2 className="h-4 w-4" />
+                        )}
+                        מחק נבחרים ({selectedPsakim.length})
+                      </Button>
                     </div>
                   </div>
 
@@ -2172,6 +3703,32 @@ export function SmartSearchPage() {
                                 <div className="flex items-center justify-between gap-2">
                                   <h4 className="font-bold text-lg text-[#1e3a5f]">{psak.title}</h4>
                                   <div className="flex items-center gap-2">
+                                    {/* Edit Button */}
+                                    <Button
+                                      variant="ghost"
+                                      size="sm"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        openEditDialog(psak);
+                                      }}
+                                      className="h-8 w-8 p-0 text-[#1e3a5f] hover:bg-[#b8860b]/20"
+                                      title="ערוך כותרת"
+                                    >
+                                      <Pencil className="h-4 w-4" />
+                                    </Button>
+                                    {/* Delete Button */}
+                                    <Button
+                                      variant="ghost"
+                                      size="sm"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        deletePsak(psak.id);
+                                      }}
+                                      className="h-8 w-8 p-0 text-red-600 hover:bg-red-100"
+                                      title="מחק"
+                                    >
+                                      <Trash2 className="h-4 w-4" />
+                                    </Button>
                                     {psak.full_text && (
                                       <Badge variant="outline" className="bg-white text-[#1e3a5f] border-[#b8860b]">
                                         טקסט מלא
@@ -2961,6 +4518,16 @@ export function SmartSearchPage() {
           </DialogContent>
         </Dialog>
 
+        {/* Edit Title Dialog */}
+        <EditTitleDialog
+          open={editDialog.open}
+          psak={editDialog.psak}
+          newTitle={editDialog.newTitle}
+          onOpenChange={(open) => setEditDialog(prev => ({ ...prev, open }))}
+          onTitleChange={(title) => setEditDialog(prev => ({ ...prev, newTitle: title }))}
+          onSave={saveEditedTitle}
+        />
+
         {/* Floating Settings Button */}
         <div className="fixed bottom-6 left-6 z-50">
           <Tooltip>
@@ -3047,13 +4614,23 @@ function ConditionCard({ condition, index, onUpdate, onRemove, showLogicalOperat
         {/* Different input based on operator type */}
         {condition.operator === 'near' ? (
           <div className="flex items-center gap-2 flex-1">
-            <Input
-              value={condition.term}
-              onChange={(e) => onUpdate({ term: e.target.value })}
-              placeholder="מילה ראשונה..."
-              className="flex-1"
-              dir="rtl"
-            />
+            <div className="relative flex-1">
+              <Input
+                value={condition.term}
+                onChange={(e) => onUpdate({ term: e.target.value })}
+                placeholder="מילה ראשונה..."
+                className="pr-8"
+                dir="rtl"
+              />
+              {condition.term && (
+                <button
+                  onClick={() => onUpdate({ term: '' })}
+                  className="absolute left-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-red-500"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              )}
+            </div>
             <span className="text-sm text-muted-foreground whitespace-nowrap">בקרבת</span>
             <Input
               type="number"
@@ -3064,23 +4641,43 @@ function ConditionCard({ condition, index, onUpdate, onRemove, showLogicalOperat
               max={50}
             />
             <span className="text-sm text-muted-foreground whitespace-nowrap">מילים מ-</span>
-            <Input
-              value={condition.nearWord || ''}
-              onChange={(e) => onUpdate({ nearWord: e.target.value })}
-              placeholder="מילה שנייה..."
-              className="flex-1"
-              dir="rtl"
-            />
+            <div className="relative flex-1">
+              <Input
+                value={condition.nearWord || ''}
+                onChange={(e) => onUpdate({ nearWord: e.target.value })}
+                placeholder="מילה שנייה..."
+                className="pr-8"
+                dir="rtl"
+              />
+              {condition.nearWord && (
+                <button
+                  onClick={() => onUpdate({ nearWord: '' })}
+                  className="absolute left-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-red-500"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              )}
+            </div>
           </div>
         ) : condition.operator === 'list' ? (
           <div className="flex items-center gap-2 flex-1">
-            <Textarea
-              value={(condition.listWords || []).join('\n')}
-              onChange={(e) => onUpdate({ listWords: e.target.value.split('\n').filter(w => w.trim()) })}
-              placeholder="הזן מילים (כל מילה בשורה חדשה)..."
-              className="flex-1 min-h-[60px]"
-              dir="rtl"
-            />
+            <div className="relative flex-1">
+              <Textarea
+                value={(condition.listWords || []).join('\n')}
+                onChange={(e) => onUpdate({ listWords: e.target.value.split('\n').filter(w => w.trim()) })}
+                placeholder="הזן מילים (כל מילה בשורה חדשה)..."
+                className="min-h-[60px] pr-8"
+                dir="rtl"
+              />
+              {(condition.listWords?.length || 0) > 0 && (
+                <button
+                  onClick={() => onUpdate({ listWords: [] })}
+                  className="absolute left-2 top-2 text-gray-400 hover:text-red-500"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              )}
+            </div>
             <Select
               value={condition.listMode || 'any'}
               onValueChange={(value) => onUpdate({ listMode: value as 'any' | 'all' })}
@@ -3130,13 +4727,23 @@ function ConditionCard({ condition, index, onUpdate, onRemove, showLogicalOperat
             )}
           </div>
         ) : (
-          <Input
-            value={condition.term}
-            onChange={(e) => onUpdate({ term: e.target.value })}
-            placeholder="מילת חיפוש..."
-            className="flex-1"
-            dir="rtl"
-          />
+          <div className="relative flex-1">
+            <Input
+              value={condition.term}
+              onChange={(e) => onUpdate({ term: e.target.value })}
+              placeholder="מילת חיפוש (ריק = כל הפסקים)..."
+              className="pr-8"
+              dir="rtl"
+            />
+            {condition.term && (
+              <button
+                onClick={() => onUpdate({ term: '' })}
+                className="absolute left-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-red-500"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            )}
+          </div>
         )}
 
         {condition.operator !== 'near' && condition.operator !== 'list' && condition.operator !== 'pattern' && (
@@ -3357,6 +4964,66 @@ function PositionRuleCard({ rule, onUpdate, onRemove }: PositionRuleCardProps) {
         </div>
       )}
     </div>
+  );
+}
+
+// Edit Title Dialog Component
+function EditTitleDialog({ 
+  open, 
+  psak, 
+  newTitle, 
+  onOpenChange, 
+  onTitleChange, 
+  onSave 
+}: { 
+  open: boolean; 
+  psak: PsakDin | null; 
+  newTitle: string; 
+  onOpenChange: (open: boolean) => void; 
+  onTitleChange: (title: string) => void; 
+  onSave: () => void;
+}) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-[500px]" dir="rtl">
+        <DialogHeader>
+          <DialogTitle className="text-right text-[#1e3a5f]">עריכת כותרת פסק דין</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-4 py-4">
+          <div className="space-y-2">
+            <Label htmlFor="new-title" className="text-right">כותרת חדשה</Label>
+            <Input
+              id="new-title"
+              value={newTitle}
+              onChange={(e) => onTitleChange(e.target.value)}
+              className="text-right"
+              dir="rtl"
+              placeholder="הזן כותרת חדשה..."
+            />
+          </div>
+          {psak && (
+            <div className="p-3 bg-gray-50 rounded-lg text-sm text-muted-foreground">
+              <p><strong>בית דין:</strong> {psak.court}</p>
+              <p><strong>שנה:</strong> {psak.year}</p>
+              {psak.case_number && <p><strong>תיק:</strong> {psak.case_number}</p>}
+            </div>
+          )}
+        </div>
+        <div className="flex justify-end gap-2">
+          <Button variant="outline" onClick={() => onOpenChange(false)}>
+            ביטול
+          </Button>
+          <Button 
+            onClick={onSave}
+            disabled={!newTitle.trim()}
+            className="bg-[#b8860b] hover:bg-[#996d00] text-white"
+          >
+            <Check className="h-4 w-4 ml-1" />
+            שמור
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 
