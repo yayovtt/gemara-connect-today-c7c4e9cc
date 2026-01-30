@@ -8,6 +8,7 @@ import {
   UploadAbortError 
 } from '@/lib/uploadUtils';
 import { toast } from '@/hooks/use-toast';
+import { supabase } from '@/integrations/supabase/client';
 
 const BATCH_SIZE = 5;
 
@@ -252,8 +253,6 @@ export function useUploadController(options: UseUploadControllerOptions = {}) {
     psakimToAnalyze: any[],
     signal?: AbortSignal
   ) => {
-    const { supabase } = await import('@/integrations/supabase/client');
-    
     startAnalysis(sessionId, psakimToAnalyze.map(p => p.id));
 
     for (let i = 0; i < psakimToAnalyze.length; i++) {
@@ -296,8 +295,6 @@ export function useUploadController(options: UseUploadControllerOptions = {}) {
   }, [startAnalysis, updateAnalysisProgress, markAnalyzed, completeSession, waitWhilePaused]);
 
   const analyzeExisting = useCallback(async (sessionId: string, psakimIds: string[]) => {
-    const { supabase } = await import('@/integrations/supabase/client');
-    
     const { data: psakim } = await supabase
       .from('psakei_din')
       .select('*')
