@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Settings, Check, Palette, ChevronRight, Pipette, Code, Database, FolderPlus, FileCode, Terminal, Rocket, Copy, ExternalLink, Play, RefreshCw, FileText, Loader2, CheckCircle, XCircle, Eye } from "lucide-react";
+import { Settings, Check, Palette, ChevronRight, Pipette, Code, Database, FolderPlus, FileCode, Terminal, Rocket, Copy, ExternalLink, Play, RefreshCw, FileText, Loader2, CheckCircle, XCircle, Eye, Upload } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Popover,
@@ -70,6 +70,11 @@ export function SettingsButton() {
   const [migrationContent, setMigrationContent] = useState<string>('');
   const [showMigrationDialog, setShowMigrationDialog] = useState(false);
   const [runAllProgress, setRunAllProgress] = useState<{ current: number; total: number } | null>(null);
+  
+  // File upload state
+  const [uploadedFile, setUploadedFile] = useState<File | null>(null);
+  const [uploadedContent, setUploadedContent] = useState<string>('');
+  const [isDragging, setIsDragging] = useState(false);
 
   const handleColorChange = (key: keyof CustomColors, value: string) => {
     setLocalColors(prev => ({ ...prev, [key]: value }));
@@ -196,6 +201,104 @@ export function SettingsButton() {
       });
     }
     
+    setIsRunningMigration(false);
+  };
+
+  // File upload handlers
+  const handleFileUpload = (file: File) => {
+    if (!file.name.endsWith('.sql')) {
+      toast({
+        title: '❌ קובץ לא תקין',
+        description: 'יש להעלות קובץ SQL בלבד',
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const content = e.target?.result as string;
+      setUploadedFile(file);
+      setUploadedContent(content);
+      toast({
+        title: '📄 קובץ נטען',
+        description: `${file.name} (${(content.length / 1024).toFixed(1)} KB)`,
+      });
+    };
+    reader.readAsText(file);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(false);
+    const file = e.dataTransfer.files[0];
+    if (file) handleFileUpload(file);
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(true);
+  };
+
+  const handleDragLeave = () => {
+    setIsDragging(false);
+  };
+
+  const runUploadedMigration = async () => {
+    if (!uploadedFile || !uploadedContent) {
+      toast({
+        title: '⚠️ אין קובץ',
+        description: 'יש להעלות קובץ SQL קודם',
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    setIsRunningMigration(true);
+    
+    try {
+      // Split SQL into statements
+      const statements = uploadedContent
+        .split(/;\s*$/m)
+        .map(s => s.trim())
+        .filter(s => s.length > 0 && !s.startsWith('--'));
+
+      let successCount = 0;
+      let errorCount = 0;
+
+      for (const statement of statements) {
+        const { data, error } = await supabase.rpc('exec_sql', { sql_text: statement + ';' });
+        
+        if (error) {
+          console.error('SQL Error:', error);
+          errorCount++;
+        } else {
+          successCount++;
+        }
+      }
+
+      if (errorCount === 0) {
+        toast({
+          title: '✅ מיגרציה הורצה בהצלחה!',
+          description: `${successCount} פקודות SQL בוצעו`,
+        });
+        setUploadedFile(null);
+        setUploadedContent('');
+      } else {
+        toast({
+          title: '⚠️ מיגרציה הושלמה עם שגיאות',
+          description: `${successCount} הצליחו, ${errorCount} נכשלו`,
+          variant: 'destructive',
+        });
+      }
+    } catch (error: any) {
+      toast({
+        title: '❌ שגיאה בהרצת מיגרציה',
+        description: error.message || 'שגיאה לא ידועה',
+        variant: 'destructive',
+      });
+    }
+
     setIsRunningMigration(false);
   };
 
@@ -594,7 +697,87 @@ serve(async (req) => {
                 </p>
               </div>
 
-              <ScrollArea className="h-[300px]">
+              {/* File Upload Area */}
+              <div className="p-3 border-b border-border">
+                <div
+                  onDrop={handleDrop}
+                  onDragOver={handleDragOver}
+                  onDragLeave={handleDragLeave}
+                  className={cn(
+                    "border-2 border-dashed rounded-lg p-4 text-center transition-colors cursor-pointer",
+                    isDragging ? "border-accent bg-accent/10" : "border-border hover:border-muted-foreground",
+                    uploadedFile && "border-green-500 bg-green-500/10"
+                  )}
+                  onClick={() => {
+                    const input = document.createElement('input');
+                    input.type = 'file';
+                    input.accept = '.sql';
+                    input.onchange = (e) => {
+                      const file = (e.target as HTMLInputElement).files?.[0];
+                      if (file) handleFileUpload(file);
+                    };
+                    input.click();
+                  }}
+                >
+                  {uploadedFile ? (
+                    <div className="space-y-2">
+                      <CheckCircle className="h-6 w-6 mx-auto text-green-500" />
+                      <div className="text-xs font-medium">{uploadedFile.name}</div>
+                      <div className="text-[10px] text-muted-foreground">
+                        {(uploadedContent.length / 1024).toFixed(1)} KB
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="space-y-1">
+                      <FileText className="h-6 w-6 mx-auto text-muted-foreground" />
+                      <div className="text-xs">גרור קובץ SQL או לחץ לבחירה</div>
+                    </div>
+                  )}
+                </div>
+
+                {uploadedFile && (
+                  <div className="flex gap-2 mt-2">
+                    <Button
+                      size="sm"
+                      className="flex-1 text-xs h-7 gap-1"
+                      onClick={runUploadedMigration}
+                      disabled={isRunningMigration}
+                    >
+                      {isRunningMigration ? (
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                      ) : (
+                        <Play className="h-3 w-3" />
+                      )}
+                      הרץ מיגרציה
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="text-xs h-7 gap-1"
+                      onClick={() => {
+                        setSelectedMigration(uploadedFile.name);
+                        setMigrationContent(uploadedContent);
+                        setShowMigrationDialog(true);
+                      }}
+                    >
+                      <Eye className="h-3 w-3" />
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="text-xs h-7 gap-1"
+                      onClick={() => {
+                        setUploadedFile(null);
+                        setUploadedContent('');
+                      }}
+                    >
+                      <XCircle className="h-3 w-3" />
+                    </Button>
+                  </div>
+                )}
+              </div>
+
+              <ScrollArea className="h-[200px]">
                 <div className="p-2 space-y-1">
                   {MIGRATION_FILES.map((migration, index) => {
                     const status = migrationStatuses[migration.name];
