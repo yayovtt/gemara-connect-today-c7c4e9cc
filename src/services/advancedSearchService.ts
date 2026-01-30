@@ -49,23 +49,11 @@ export async function serverFullTextSearch(
   limit: number = 100
 ): Promise<ServerSearchResult[]> {
   try {
-    // Try using the search function first
-    const { data, error } = await supabase
-      .rpc('search_psakei_din', {
-        search_query: query,
-        result_limit: limit,
-      });
-
-    if (error) {
-      console.warn('FTS search failed, falling back to ILIKE:', error);
-      // Fallback to simple ILIKE search
-      return serverSimpleSearch(query, limit);
-    }
-
-    return (data as ServerSearchResult[]) || [];
+    // Try simple ILIKE search (no RPC function needed)
+    return await serverSimpleSearch(query, limit);
   } catch (err) {
     console.error('Server search error:', err);
-    return serverSimpleSearch(query, limit);
+    return [];
   }
 }
 
@@ -108,28 +96,22 @@ export async function serverPrefixSearch(
   limit: number = 10
 ): Promise<ServerSearchResult[]> {
   try {
+    // Direct query without RPC
     const { data, error } = await supabase
-      .rpc('search_psakei_din_prefix', {
-        search_prefix: prefix,
-        result_limit: limit,
-      });
+      .from('psakei_din')
+      .select('id, title, court, year, summary, case_number')
+      .or(`title.ilike.${prefix}%,title.ilike.%${prefix}%`)
+      .limit(limit);
 
     if (error) {
-      console.warn('Prefix search function failed, using fallback:', error);
-      // Fallback
-      const { data: fallbackData } = await supabase
-        .from('psakei_din')
-        .select('id, title, court, year, summary, case_number')
-        .or(`title.ilike.${prefix}%,title.ilike.%${prefix}%`)
-        .limit(limit);
-      
-      return (fallbackData || []).map((item: Partial<PsakDin>) => ({
-        ...item,
-        rank: item.title?.toLowerCase().startsWith(prefix.toLowerCase()) ? 10 : 5,
-      })) as ServerSearchResult[];
+      console.error('Prefix search error:', error);
+      return [];
     }
-
-    return (data as ServerSearchResult[]) || [];
+    
+    return (data || []).map((item: Partial<PsakDin>) => ({
+      ...item,
+      rank: item.title?.toLowerCase().startsWith(prefix.toLowerCase()) ? 10 : 5,
+    })) as ServerSearchResult[];
   } catch (err) {
     console.error('Prefix search error:', err);
     return [];
