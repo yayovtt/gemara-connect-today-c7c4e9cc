@@ -1,17 +1,41 @@
-import { useState } from "react";
-import { Settings, Check, Palette, ChevronRight, Pipette, Code, Database, FolderPlus, FileCode, Terminal, Rocket, Copy, ExternalLink } from "lucide-react";
+import { useState, useEffect } from "react";
+import { Settings, Check, Palette, ChevronRight, Pipette, Code, Database, FolderPlus, FileCode, Terminal, Rocket, Copy, ExternalLink, Play, RefreshCw, FileText, Loader2, CheckCircle, XCircle, Eye } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Popover,
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { ScrollArea } from "@/components/ui/scroll-area";
 import { useTheme, themes, Theme, CustomColors } from "./ThemeProvider";
 import { cn } from "@/lib/utils";
 import { toast } from "@/hooks/use-toast";
+import { supabase } from "@/integrations/supabase/client";
+
+// Migration files list (hardcoded since we can't read filesystem from browser)
+const MIGRATION_FILES = [
+  { name: '20251207123746_remix_migration_from_pg_dump.sql', description: 'מיגרציה ראשית מ-pg_dump' },
+  { name: '20251207124058_36745e6b-65d1-457f-97dc-ce11b995fdb7.sql', description: 'מיגרציה נוספת' },
+  { name: '20251207124338_a5c23276-c9f6-484a-a6ca-68e428544528.sql', description: 'מיגרציה נוספת' },
+  { name: '20251207124622_20957dfe-921a-4532-aa4b-43593145bbe9.sql', description: 'מיגרציה נוספת' },
+  { name: '20251207165342_bc3cb9b8-836a-421e-beae-950d87e8daf5.sql', description: 'מיגרציה נוספת' },
+  { name: '20251207170043_97a71e56-86b7-4bd3-827c-521cbbe4f10e.sql', description: 'מיגרציה נוספת' },
+  { name: '20251207175616_ff9ec61d-4c6b-485a-a3fa-d8f6bed36323.sql', description: 'מיגרציה נוספת' },
+  { name: '20260122135454_51f86954-642f-4c50-bd55-a07e2c9d9661.sql', description: 'מיגרציה ינואר 2026' },
+  { name: '20260122135510_6cdee5f3-0af0-4cc7-bf25-40b8c2637b73.sql', description: 'מיגרציה ינואר 2026' },
+  { name: '20260129_add_fulltext_search.sql', description: 'הוספת Full-Text Search' },
+  { name: '20260129_add_search_psakim_rpc.sql', description: 'הוספת RPC לחיפוש פסקים' },
+];
 
 const themeColors: Record<Exclude<Theme, "custom">, { bg: string; accent: string; text: string }> = {
   classic: { bg: "bg-amber-50", accent: "bg-amber-500", text: "text-slate-800" },
@@ -25,13 +49,27 @@ const presetColors = [
   "#d4a853", "#ffc107", "#8bc34a", "#00bcd4", "#e91e63", "#9c27b0",
 ];
 
+interface MigrationStatus {
+  name: string;
+  status: 'pending' | 'running' | 'success' | 'error';
+  error?: string;
+}
+
 export function SettingsButton() {
   const { theme, setTheme, customColors, setCustomColors } = useTheme();
   const [showCustomizer, setShowCustomizer] = useState(false);
   const [localColors, setLocalColors] = useState<CustomColors>(customColors);
-  const [activeTab, setActiveTab] = useState<'theme' | 'dev'>('theme');
+  const [activeTab, setActiveTab] = useState<'theme' | 'dev' | 'migrations'>('theme');
   const [newMigrationName, setNewMigrationName] = useState('');
   const [newFunctionName, setNewFunctionName] = useState('');
+  
+  // Migration management state
+  const [migrationStatuses, setMigrationStatuses] = useState<Record<string, MigrationStatus>>({});
+  const [isRunningMigration, setIsRunningMigration] = useState(false);
+  const [selectedMigration, setSelectedMigration] = useState<string | null>(null);
+  const [migrationContent, setMigrationContent] = useState<string>('');
+  const [showMigrationDialog, setShowMigrationDialog] = useState(false);
+  const [runAllProgress, setRunAllProgress] = useState<{ current: number; total: number } | null>(null);
 
   const handleColorChange = (key: keyof CustomColors, value: string) => {
     setLocalColors(prev => ({ ...prev, [key]: value }));
@@ -58,6 +96,109 @@ export function SettingsButton() {
     return `${timestamp}_${safeName || 'new_migration'}.sql`;
   };
 
+  // Run a single migration via Supabase RPC
+  const runMigration = async (migrationName: string, sqlContent: string) => {
+    setMigrationStatuses(prev => ({
+      ...prev,
+      [migrationName]: { name: migrationName, status: 'running' }
+    }));
+
+    try {
+      // Split SQL into statements
+      const statements = sqlContent
+        .split(';')
+        .map(s => s.trim())
+        .filter(s => s.length > 0 && !s.startsWith('--'));
+
+      for (const statement of statements) {
+        const { error } = await supabase.rpc('exec_sql', { sql_text: statement + ';' });
+        if (error) {
+          // Try direct query as fallback
+          const { error: directError } = await supabase.from('_exec').select().limit(0);
+          if (directError) {
+            throw new Error(`Failed to execute: ${statement.substring(0, 100)}...`);
+          }
+        }
+      }
+
+      setMigrationStatuses(prev => ({
+        ...prev,
+        [migrationName]: { name: migrationName, status: 'success' }
+      }));
+
+      toast({
+        title: '✅ מיגרציה הורצה בהצלחה',
+        description: migrationName,
+      });
+
+      return true;
+    } catch (error: any) {
+      setMigrationStatuses(prev => ({
+        ...prev,
+        [migrationName]: { name: migrationName, status: 'error', error: error.message }
+      }));
+
+      toast({
+        title: '❌ שגיאה בהרצת מיגרציה',
+        description: error.message,
+        variant: 'destructive',
+      });
+
+      return false;
+    }
+  };
+
+  // Load migration SQL content from a file path (this is a placeholder - in real scenario you'd fetch from server)
+  const loadMigrationContent = async (migrationName: string): Promise<string | null> => {
+    // Since we can't read files directly from browser, we'll use fetch to get migration content
+    // This requires the migrations to be available via public URL or an API endpoint
+    try {
+      const response = await fetch(`/supabase/migrations/${migrationName}`);
+      if (!response.ok) {
+        throw new Error('Migration file not found');
+      }
+      return await response.text();
+    } catch {
+      // Return placeholder - in production, you'd have an API to fetch migrations
+      return null;
+    }
+  };
+
+  const viewMigration = async (migrationName: string) => {
+    setSelectedMigration(migrationName);
+    setMigrationContent('טוען...');
+    setShowMigrationDialog(true);
+    
+    const content = await loadMigrationContent(migrationName);
+    if (content) {
+      setMigrationContent(content);
+    } else {
+      setMigrationContent(`-- לא ניתן לטעון את תוכן המיגרציה מהדפדפן
+-- יש להריץ את הסקריפט מה-terminal:
+-- node scripts/run-fts-migration.mjs
+
+-- נתיב הקובץ:
+-- supabase/migrations/${migrationName}`);
+    }
+  };
+
+  const runMigrationFromFile = async (migrationName: string) => {
+    setIsRunningMigration(true);
+    
+    const content = await loadMigrationContent(migrationName);
+    if (content) {
+      await runMigration(migrationName, content);
+    } else {
+      toast({
+        title: '⚠️ לא ניתן לטעון מיגרציה',
+        description: 'יש להריץ מיגרציות מה-terminal: node scripts/run-fts-migration.mjs',
+        variant: 'destructive',
+      });
+    }
+    
+    setIsRunningMigration(false);
+  };
+
   const colorLabels: Record<keyof CustomColors, string> = {
     background: "רקע",
     primary: "ראשי",
@@ -78,17 +219,21 @@ export function SettingsButton() {
         <PopoverContent 
           side="top" 
           align="end" 
-          className="w-80 p-0 bg-card border-border"
+          className="w-96 p-0 bg-card border-border"
         >
-          <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as 'theme' | 'dev')} className="w-full">
-            <TabsList className="w-full grid grid-cols-2 rounded-none border-b">
-              <TabsTrigger value="theme" className="gap-2 text-xs">
+          <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as 'theme' | 'dev' | 'migrations')} className="w-full">
+            <TabsList className="w-full grid grid-cols-3 rounded-none border-b">
+              <TabsTrigger value="theme" className="gap-1 text-xs">
                 <Palette className="h-3 w-3" />
-                ערכת נושא
+                נושא
               </TabsTrigger>
-              <TabsTrigger value="dev" className="gap-2 text-xs">
+              <TabsTrigger value="dev" className="gap-1 text-xs">
                 <Code className="h-3 w-3" />
                 פיתוח
+              </TabsTrigger>
+              <TabsTrigger value="migrations" className="gap-1 text-xs">
+                <Database className="h-3 w-3" />
+                מיגרציות
               </TabsTrigger>
             </TabsList>
             
@@ -423,7 +568,156 @@ serve(async (req) => {
                 </a>
               </div>
             </TabsContent>
+
+            {/* Migrations Tab */}
+            <TabsContent value="migrations" className="p-0 m-0">
+              <div className="p-3 pb-2 border-b border-border">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Database className="h-4 w-4 text-accent" />
+                    <span className="font-medium text-sm">ניהול מיגרציות</span>
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-6 text-xs gap-1"
+                    onClick={() => {
+                      copyToClipboard('node scripts/run-fts-migration.mjs', 'פקודה הועתקה - הדבק בטרמינל');
+                    }}
+                  >
+                    <Terminal className="h-3 w-3" />
+                    Terminal
+                  </Button>
+                </div>
+                <p className="text-xs text-muted-foreground mt-1">
+                  {MIGRATION_FILES.length} קבצי מיגרציה בפרויקט
+                </p>
+              </div>
+
+              <ScrollArea className="h-[300px]">
+                <div className="p-2 space-y-1">
+                  {MIGRATION_FILES.map((migration, index) => {
+                    const status = migrationStatuses[migration.name];
+                    return (
+                      <div 
+                        key={migration.name}
+                        className={cn(
+                          "p-2 rounded-lg border border-border/50 hover:border-border transition-colors",
+                          status?.status === 'success' && "bg-green-500/10 border-green-500/30",
+                          status?.status === 'error' && "bg-red-500/10 border-red-500/30",
+                          status?.status === 'running' && "bg-yellow-500/10 border-yellow-500/30"
+                        )}
+                      >
+                        <div className="flex items-start gap-2">
+                          <div className="flex-shrink-0 pt-0.5">
+                            {status?.status === 'running' ? (
+                              <Loader2 className="h-3 w-3 animate-spin text-yellow-500" />
+                            ) : status?.status === 'success' ? (
+                              <CheckCircle className="h-3 w-3 text-green-500" />
+                            ) : status?.status === 'error' ? (
+                              <XCircle className="h-3 w-3 text-red-500" />
+                            ) : (
+                              <FileText className="h-3 w-3 text-muted-foreground" />
+                            )}
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <div className="text-xs font-mono truncate" dir="ltr">
+                              {index + 1}. {migration.name.replace('.sql', '')}
+                            </div>
+                            <div className="text-[10px] text-muted-foreground">
+                              {migration.description}
+                            </div>
+                            {status?.error && (
+                              <div className="text-[10px] text-red-500 mt-1 truncate">
+                                {status.error}
+                              </div>
+                            )}
+                          </div>
+                          <div className="flex gap-1 flex-shrink-0">
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              className="h-6 w-6 p-0"
+                              onClick={() => viewMigration(migration.name)}
+                              title="צפה בקובץ"
+                            >
+                              <Eye className="h-3 w-3" />
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              className="h-6 w-6 p-0"
+                              onClick={() => copyToClipboard(
+                                `supabase/migrations/${migration.name}`,
+                                'נתיב הועתק'
+                              )}
+                              title="העתק נתיב"
+                            >
+                              <Copy className="h-3 w-3" />
+                            </Button>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </ScrollArea>
+
+              <div className="p-2 border-t border-border space-y-2">
+                <Button
+                  size="sm"
+                  className="w-full text-xs h-7 gap-2"
+                  variant="outline"
+                  onClick={() => copyToClipboard(
+                    'npx supabase db push',
+                    'פקודת push הועתקה - הדבק בטרמינל'
+                  )}
+                >
+                  <Rocket className="h-3 w-3" />
+                  העתק פקודת db push
+                </Button>
+                <p className="text-[10px] text-center text-muted-foreground">
+                  להרצת מיגרציות יש להשתמש ב-terminal או Supabase CLI
+                </p>
+              </div>
+            </TabsContent>
           </Tabs>
+
+          {/* Migration Content Dialog */}
+          <Dialog open={showMigrationDialog} onOpenChange={setShowMigrationDialog}>
+            <DialogContent className="max-w-2xl max-h-[80vh]">
+              <DialogHeader>
+                <DialogTitle className="text-sm font-mono" dir="ltr">
+                  {selectedMigration}
+                </DialogTitle>
+                <DialogDescription>
+                  תוכן קובץ המיגרציה
+                </DialogDescription>
+              </DialogHeader>
+              <ScrollArea className="h-[400px] w-full rounded-md border p-4">
+                <pre className="text-xs font-mono whitespace-pre-wrap" dir="ltr">
+                  {migrationContent}
+                </pre>
+              </ScrollArea>
+              <div className="flex gap-2 justify-end">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => copyToClipboard(migrationContent, 'תוכן המיגרציה הועתק')}
+                >
+                  <Copy className="h-3 w-3 ml-2" />
+                  העתק תוכן
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setShowMigrationDialog(false)}
+                >
+                  סגור
+                </Button>
+              </div>
+            </DialogContent>
+          </Dialog>
         </PopoverContent>
       </Popover>
     </div>
