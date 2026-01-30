@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Settings, Check, Palette, ChevronRight, Pipette } from "lucide-react";
+import { Settings, Check, Palette, ChevronRight, Pipette, Code, Database, FolderPlus, FileCode, Terminal, Rocket, Copy, ExternalLink } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Popover,
@@ -8,8 +8,10 @@ import {
 } from "@/components/ui/popover";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useTheme, themes, Theme, CustomColors } from "./ThemeProvider";
 import { cn } from "@/lib/utils";
+import { toast } from "@/hooks/use-toast";
 
 const themeColors: Record<Exclude<Theme, "custom">, { bg: string; accent: string; text: string }> = {
   classic: { bg: "bg-amber-50", accent: "bg-amber-500", text: "text-slate-800" },
@@ -27,6 +29,9 @@ export function SettingsButton() {
   const { theme, setTheme, customColors, setCustomColors } = useTheme();
   const [showCustomizer, setShowCustomizer] = useState(false);
   const [localColors, setLocalColors] = useState<CustomColors>(customColors);
+  const [activeTab, setActiveTab] = useState<'theme' | 'dev'>('theme');
+  const [newMigrationName, setNewMigrationName] = useState('');
+  const [newFunctionName, setNewFunctionName] = useState('');
 
   const handleColorChange = (key: keyof CustomColors, value: string) => {
     setLocalColors(prev => ({ ...prev, [key]: value }));
@@ -35,6 +40,22 @@ export function SettingsButton() {
   const applyCustomColors = () => {
     setCustomColors(localColors);
     setTheme("custom");
+  };
+
+  const copyToClipboard = (text: string, description: string) => {
+    navigator.clipboard.writeText(text);
+    toast({
+      title: '📋 הועתק!',
+      description,
+    });
+  };
+
+  const generateMigrationFileName = () => {
+    const now = new Date();
+    const timestamp = now.toISOString().slice(0, 10).replace(/-/g, '') + 
+                     now.toTimeString().slice(0, 8).replace(/:/g, '');
+    const safeName = newMigrationName.trim().toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '');
+    return `${timestamp}_${safeName || 'new_migration'}.sql`;
   };
 
   const colorLabels: Record<keyof CustomColors, string> = {
@@ -57,8 +78,21 @@ export function SettingsButton() {
         <PopoverContent 
           side="top" 
           align="end" 
-          className="w-72 p-3 bg-card border-border"
+          className="w-80 p-0 bg-card border-border"
         >
+          <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as 'theme' | 'dev')} className="w-full">
+            <TabsList className="w-full grid grid-cols-2 rounded-none border-b">
+              <TabsTrigger value="theme" className="gap-2 text-xs">
+                <Palette className="h-3 w-3" />
+                ערכת נושא
+              </TabsTrigger>
+              <TabsTrigger value="dev" className="gap-2 text-xs">
+                <Code className="h-3 w-3" />
+                פיתוח
+              </TabsTrigger>
+            </TabsList>
+            
+            <TabsContent value="theme" className="p-3 m-0">
           {!showCustomizer ? (
             <>
               <div className="flex items-center gap-2 mb-3 pb-2 border-b border-border">
@@ -194,6 +228,202 @@ export function SettingsButton() {
               </div>
             </>
           )}
+            </TabsContent>
+            
+            <TabsContent value="dev" className="p-3 m-0 space-y-4">
+              {/* Development Tools Header */}
+              <div className="flex items-center gap-2 pb-2 border-b border-border">
+                <Terminal className="h-4 w-4 text-accent" />
+                <span className="font-medium text-sm">כלי פיתוח Supabase</span>
+              </div>
+
+              {/* Create New Migration */}
+              <div className="space-y-2">
+                <Label className="text-xs font-medium flex items-center gap-1">
+                  <Database className="h-3 w-3" />
+                  יצירת מיגרציה חדשה
+                </Label>
+                <Input
+                  placeholder="שם המיגרציה (באנגלית)"
+                  value={newMigrationName}
+                  onChange={(e) => setNewMigrationName(e.target.value)}
+                  className="text-xs h-8"
+                  dir="ltr"
+                />
+                <div className="flex gap-1">
+                  <Button 
+                    size="sm" 
+                    variant="outline" 
+                    className="flex-1 text-xs h-7 gap-1"
+                    onClick={() => {
+                      const fileName = generateMigrationFileName();
+                      const path = `supabase/migrations/${fileName}`;
+                      copyToClipboard(path, `נתיב: ${path}`);
+                    }}
+                  >
+                    <Copy className="h-3 w-3" />
+                    העתק נתיב
+                  </Button>
+                  <Button 
+                    size="sm" 
+                    variant="outline" 
+                    className="flex-1 text-xs h-7 gap-1"
+                    onClick={() => {
+                      const template = `-- Migration: ${newMigrationName || 'new_migration'}
+-- Created: ${new Date().toISOString()}
+
+-- Add your SQL here
+`;
+                      copyToClipboard(template, 'תבנית SQL הועתקה');
+                    }}
+                  >
+                    <FileCode className="h-3 w-3" />
+                    תבנית SQL
+                  </Button>
+                </div>
+              </div>
+
+              {/* Create New Function */}
+              <div className="space-y-2">
+                <Label className="text-xs font-medium flex items-center gap-1">
+                  <FolderPlus className="h-3 w-3" />
+                  יצירת Edge Function חדשה
+                </Label>
+                <Input
+                  placeholder="שם הפונקציה (באנגלית)"
+                  value={newFunctionName}
+                  onChange={(e) => setNewFunctionName(e.target.value)}
+                  className="text-xs h-8"
+                  dir="ltr"
+                />
+                <div className="flex gap-1">
+                  <Button 
+                    size="sm" 
+                    variant="outline" 
+                    className="flex-1 text-xs h-7 gap-1"
+                    onClick={() => {
+                      const safeName = newFunctionName.trim().toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '') || 'new-function';
+                      const path = `supabase/functions/${safeName}/index.ts`;
+                      copyToClipboard(path, `נתיב: ${path}`);
+                    }}
+                  >
+                    <Copy className="h-3 w-3" />
+                    העתק נתיב
+                  </Button>
+                  <Button 
+                    size="sm" 
+                    variant="outline" 
+                    className="flex-1 text-xs h-7 gap-1"
+                    onClick={() => {
+                      const safeName = newFunctionName.trim().toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '') || 'new-function';
+                      const template = `// Edge Function: ${safeName}
+// https://supabase.com/docs/guides/functions
+
+import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+}
+
+serve(async (req) => {
+  // Handle CORS
+  if (req.method === 'OPTIONS') {
+    return new Response('ok', { headers: corsHeaders })
+  }
+
+  try {
+    const supabase = createClient(
+      Deno.env.get('SUPABASE_URL') ?? '',
+      Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
+    )
+
+    const { data, error } = await req.json()
+    
+    // Your logic here
+    
+    return new Response(
+      JSON.stringify({ success: true, data }),
+      { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+    )
+  } catch (error) {
+    return new Response(
+      JSON.stringify({ error: error.message }),
+      { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+    )
+  }
+})
+`;
+                      copyToClipboard(template, 'תבנית Edge Function הועתקה');
+                    }}
+                  >
+                    <FileCode className="h-3 w-3" />
+                    תבנית TS
+                  </Button>
+                </div>
+              </div>
+
+              {/* Quick Commands */}
+              <div className="space-y-2">
+                <Label className="text-xs font-medium flex items-center gap-1">
+                  <Rocket className="h-3 w-3" />
+                  פקודות מהירות
+                </Label>
+                <div className="grid grid-cols-1 gap-1">
+                  <Button 
+                    size="sm" 
+                    variant="outline" 
+                    className="justify-start text-xs h-7 gap-2"
+                    onClick={() => copyToClipboard('npx supabase db push', 'פקודת push הועתקה')}
+                  >
+                    <Terminal className="h-3 w-3" />
+                    <span dir="ltr">supabase db push</span>
+                  </Button>
+                  <Button 
+                    size="sm" 
+                    variant="outline" 
+                    className="justify-start text-xs h-7 gap-2"
+                    onClick={() => copyToClipboard('npx supabase functions deploy', 'פקודת deploy הועתקה')}
+                  >
+                    <Terminal className="h-3 w-3" />
+                    <span dir="ltr">supabase functions deploy</span>
+                  </Button>
+                  <Button 
+                    size="sm" 
+                    variant="outline" 
+                    className="justify-start text-xs h-7 gap-2"
+                    onClick={() => copyToClipboard('npx supabase db diff -f new_migration', 'פקודת diff הועתקה')}
+                  >
+                    <Terminal className="h-3 w-3" />
+                    <span dir="ltr">supabase db diff</span>
+                  </Button>
+                  <Button 
+                    size="sm" 
+                    variant="outline" 
+                    className="justify-start text-xs h-7 gap-2"
+                    onClick={() => copyToClipboard('node scripts/run-fts-migration.mjs', 'פקודת migration הועתקה')}
+                  >
+                    <Terminal className="h-3 w-3" />
+                    <span dir="ltr">run-fts-migration</span>
+                  </Button>
+                </div>
+              </div>
+
+              {/* Links */}
+              <div className="pt-2 border-t border-border">
+                <a 
+                  href="https://supabase.com/dashboard" 
+                  target="_blank" 
+                  rel="noopener noreferrer"
+                  className="flex items-center gap-2 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                >
+                  <ExternalLink className="h-3 w-3" />
+                  פתח Supabase Dashboard
+                </a>
+              </div>
+            </TabsContent>
+          </Tabs>
         </PopoverContent>
       </Popover>
     </div>
