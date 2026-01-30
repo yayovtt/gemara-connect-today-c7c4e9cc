@@ -232,6 +232,29 @@ export function SettingsButton() {
       console.log('🚀 [Migration] Starting:', migrationName);
       console.log('🔗 [Migration] Fetching from:', `${GITHUB_RAW_BASE}/${migrationName}`);
       
+      // First, check if exec_sql function exists
+      console.log('🔍 [Migration] Checking if exec_sql function exists...');
+      const testResult = await supabase.rpc('exec_sql', { sql_text: 'SELECT 1;' });
+      
+      if (testResult.error) {
+        console.error('💥 [Migration] exec_sql function NOT FOUND or not accessible!');
+        console.error('💥 [Migration] Error details:', testResult.error);
+        console.error('💥 [Migration] Error code:', testResult.error.code);
+        console.error('💥 [Migration] Error message:', testResult.error.message);
+        
+        if (testResult.error.code === 'PGRST202' || testResult.error.message.includes('could not find')) {
+          toast({
+            title: '❌ פונקציית exec_sql לא קיימת!',
+            description: 'יש ליצור אותה קודם ב-Supabase Dashboard. בדוק Console (F12)',
+            variant: 'destructive',
+          });
+          throw new Error('exec_sql function does not exist. Create it first in Supabase Dashboard SQL Editor.');
+        }
+        throw new Error(`exec_sql test failed: ${testResult.error.message}`);
+      }
+      
+      console.log('✅ [Migration] exec_sql function exists and working!');
+      
       const response = await fetch(`${GITHUB_RAW_BASE}/${migrationName}`);
       console.log('📥 [Migration] Fetch response status:', response.status, response.statusText);
       
@@ -367,6 +390,50 @@ export function SettingsButton() {
     console.log('📄 [Upload Migration] Content length:', uploadedContent.length, 'bytes');
     
     try {
+      // First, check if exec_sql function exists
+      console.log('🔍 [Upload Migration] Checking if exec_sql function exists...');
+      const testResult = await supabase.rpc('exec_sql', { sql_text: 'SELECT 1;' });
+      
+      if (testResult.error) {
+        console.error('💥 [Upload Migration] exec_sql function NOT FOUND!');
+        console.error('💥 [Upload Migration] Error:', testResult.error);
+        console.error('💥 [Upload Migration] Code:', testResult.error.code);
+        console.error('💥 [Upload Migration] Message:', testResult.error.message);
+        
+        if (testResult.error.code === 'PGRST202' || testResult.error.message.includes('could not find')) {
+          toast({
+            title: '❌ פונקציית exec_sql לא קיימת!',
+            description: 'יש ליצור אותה קודם ב-Supabase Dashboard. לחץ F12 לפרטים',
+            variant: 'destructive',
+          });
+          console.error('═══════════════════════════════════════════════════════════');
+          console.error('💡 [SOLUTION] Run this SQL in Supabase Dashboard:');
+          console.error('═══════════════════════════════════════════════════════════');
+          console.error(`
+CREATE OR REPLACE FUNCTION exec_sql(sql_text TEXT)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+BEGIN
+  EXECUTE sql_text;
+  RETURN jsonb_build_object('success', true);
+EXCEPTION WHEN OTHERS THEN
+  RETURN jsonb_build_object('success', false, 'error', SQLERRM);
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION exec_sql(TEXT) TO anon;
+GRANT EXECUTE ON FUNCTION exec_sql(TEXT) TO authenticated;
+          `);
+          console.error('═══════════════════════════════════════════════════════════');
+          setIsRunningMigration(false);
+          return;
+        }
+      } else {
+        console.log('✅ [Upload Migration] exec_sql function exists and working!');
+      }
+      
       // Split SQL into statements
       const statements = uploadedContent
         .split(/;\s*$/m)
