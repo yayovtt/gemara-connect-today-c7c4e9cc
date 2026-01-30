@@ -649,6 +649,10 @@ export function SmartSearchPage() {
   // Deleting state
   const [isDeletingPsakim, setIsDeletingPsakim] = useState(false);
   
+  // DB Rebuild state
+  const [isRebuildingDB, setIsRebuildingDB] = useState(false);
+  const [rebuildProgress, setRebuildProgress] = useState({ current: 0, total: 0 });
+  
   // Search limit and progress
   const [searchLimit, setSearchLimit] = useState<number | 'all'>('all');
   const [searchProgress, setSearchProgress] = useState<{
@@ -1109,6 +1113,81 @@ export function SmartSearchPage() {
       setIsLoadingPsakim(false);
     }
   }, [dataSource, loadPsakeiDinFromLocal, loadPsakeiDinFromCloud]);
+
+  // Clear and rebuild local DB from cloud
+  const clearAndRebuildLocalDB = useCallback(async () => {
+    setIsRebuildingDB(true);
+    setRebuildProgress({ current: 0, total: 0 });
+    
+    try {
+      // Step 1: Clear existing local index
+      toast({
+        title: '🗑️ מנקה אינדקס מקומי...',
+        description: 'מוחק את כל הנתונים המקומיים',
+      });
+      
+      await clearSearchIndex();
+      setLocalIndex(null);
+      setIndexMeta(null);
+      
+      // Step 2: Load fresh data from cloud
+      toast({
+        title: '☁️ טוען נתונים מהענן...',
+        description: 'מוריד את כל פסקי הדין מ-Supabase',
+      });
+      
+      const cloudPsakim = await loadPsakeiDinFromCloud();
+      
+      if (cloudPsakim.length === 0) {
+        toast({
+          title: 'לא נמצאו פסקי דין',
+          description: 'אין נתונים בענן לבניית האינדקס',
+          variant: 'destructive',
+        });
+        setIsRebuildingDB(false);
+        return;
+      }
+      
+      setRebuildProgress({ current: 0, total: cloudPsakim.length });
+      
+      // Step 3: Build new index
+      toast({
+        title: '🔨 בונה אינדקס חדש...',
+        description: `מאנדקס ${cloudPsakim.length} פסקי דין`,
+      });
+      
+      await buildSearchIndex(cloudPsakim, (current, total) => {
+        setRebuildProgress({ current, total });
+      });
+      
+      // Step 4: Reload index metadata
+      const newMeta = await getIndexMetadata();
+      setIndexMeta(newMeta);
+      
+      // Step 5: Reload local index
+      const newIndex = await loadSearchIndex();
+      setLocalIndex(newIndex);
+      
+      // Update psakei din state
+      setPsakeiDin(cloudPsakim);
+      
+      toast({
+        title: '✅ האינדקס נבנה מחדש בהצלחה!',
+        description: `${cloudPsakim.length} פסקי דין באינדקס המקומי`,
+      });
+      
+    } catch (error) {
+      console.error('Error rebuilding DB:', error);
+      toast({
+        title: 'שגיאה בבניית האינדקס',
+        description: error instanceof Error ? error.message : 'שגיאה לא ידועה',
+        variant: 'destructive',
+      });
+    } finally {
+      setIsRebuildingDB(false);
+      setRebuildProgress({ current: 0, total: 0 });
+    }
+  }, [loadPsakeiDinFromCloud]);
   
   // Search psakei din directly on Supabase (server-side search)
   const searchPsakeiDinOnServer = useCallback(async (searchTerm: string): Promise<PsakDin[]> => {
@@ -2433,6 +2512,44 @@ export function SmartSearchPage() {
                     )}
                     טען
                   </Button>
+                  
+                  {/* Clear and Rebuild DB Button */}
+                  <TooltipProvider>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button 
+                          variant="outline" 
+                          size="sm" 
+                          onClick={clearAndRebuildLocalDB} 
+                          disabled={isRebuildingDB || isLoadingPsakim}
+                          className="border-red-400 text-red-600 hover:bg-red-50 gap-2"
+                        >
+                          {isRebuildingDB ? (
+                            <>
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                              {rebuildProgress.total > 0 && (
+                                <span className="text-xs">
+                                  {Math.round((rebuildProgress.current / rebuildProgress.total) * 100)}%
+                                </span>
+                              )}
+                            </>
+                          ) : (
+                            <>
+                              <Trash2 className="h-4 w-4" />
+                              בנה מחדש
+                            </>
+                          )}
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent side="bottom" className="max-w-xs">
+                        <p className="text-sm">
+                          מוחק את האינדקס המקומי ובונה אותו מחדש מהענן.
+                          <br />
+                          שימושי כאשר יש בעיות סנכרון או נתונים פגומים.
+                        </p>
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
                 </div>
               </div>
             </CardContent>
