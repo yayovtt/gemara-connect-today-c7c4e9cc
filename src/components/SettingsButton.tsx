@@ -37,6 +37,9 @@ const MIGRATION_FILES = [
   { name: '20260129_add_search_psakim_rpc.sql', description: 'הוספת RPC לחיפוש פסקים' },
 ];
 
+// GitHub raw URL for migrations
+const GITHUB_RAW_BASE = 'https://raw.githubusercontent.com/yayovtt/gemara-connect-today-c7c4e9cc/main/supabase/migrations';
+
 const themeColors: Record<Exclude<Theme, "custom">, { bg: string; accent: string; text: string }> = {
   classic: { bg: "bg-amber-50", accent: "bg-amber-500", text: "text-slate-800" },
   midnight: { bg: "bg-slate-900", accent: "bg-amber-500", text: "text-amber-100" },
@@ -171,19 +174,31 @@ export function SettingsButton() {
 
   const viewMigration = async (migrationName: string) => {
     setSelectedMigration(migrationName);
-    setMigrationContent('טוען...');
+    setMigrationContent('טוען מ-GitHub...');
     setShowMigrationDialog(true);
+    
+    try {
+      // Try to fetch from GitHub first
+      const response = await fetch(`${GITHUB_RAW_BASE}/${migrationName}`);
+      if (response.ok) {
+        const content = await response.text();
+        setMigrationContent(content);
+        return;
+      }
+    } catch {
+      // Fallback to local load
+    }
     
     const content = await loadMigrationContent(migrationName);
     if (content) {
       setMigrationContent(content);
     } else {
-      setMigrationContent(`-- לא ניתן לטעון את תוכן המיגרציה מהדפדפן
--- יש להריץ את הסקריפט מה-terminal:
--- node scripts/run-fts-migration.mjs
+      setMigrationContent(`-- לא ניתן לטעון את תוכן המיגרציה
+-- נתיב הקובץ: supabase/migrations/${migrationName}
 
--- נתיב הקובץ:
--- supabase/migrations/${migrationName}`);
+-- אפשרויות:
+-- 1. העלה את הקובץ ידנית דרך אזור ההעלאה
+-- 2. הרץ מה-terminal: node scripts/run-fts-migration.mjs`);
     }
   };
 
@@ -202,6 +217,77 @@ export function SettingsButton() {
     }
     
     setIsRunningMigration(false);
+  };
+
+  // Fetch and run migration from GitHub
+  const runMigrationFromGitHub = async (migrationName: string) => {
+    setMigrationStatuses(prev => ({
+      ...prev,
+      [migrationName]: { name: migrationName, status: 'running' }
+    }));
+
+    try {
+      // Fetch migration content from GitHub
+      const response = await fetch(`${GITHUB_RAW_BASE}/${migrationName}`);
+      if (!response.ok) {
+        throw new Error(`לא נמצא קובץ: ${migrationName}`);
+      }
+      
+      const sqlContent = await response.text();
+      
+      // Split SQL into statements
+      const statements = sqlContent
+        .split(/;\s*$/m)
+        .map(s => s.trim())
+        .filter(s => s.length > 0 && !s.startsWith('--'));
+
+      let successCount = 0;
+      let errorCount = 0;
+      let lastError = '';
+
+      for (const statement of statements) {
+        const { data, error } = await supabase.rpc('exec_sql', { sql_text: statement + ';' });
+        
+        if (error) {
+          console.error('SQL Error:', error);
+          errorCount++;
+          lastError = error.message;
+        } else {
+          successCount++;
+        }
+      }
+
+      if (errorCount === 0) {
+        setMigrationStatuses(prev => ({
+          ...prev,
+          [migrationName]: { name: migrationName, status: 'success' }
+        }));
+        toast({
+          title: '✅ מיגרציה הורצה בהצלחה!',
+          description: `${migrationName} - ${successCount} פקודות בוצעו`,
+        });
+      } else {
+        setMigrationStatuses(prev => ({
+          ...prev,
+          [migrationName]: { name: migrationName, status: 'error', error: lastError }
+        }));
+        toast({
+          title: '⚠️ מיגרציה הושלמה עם שגיאות',
+          description: `${successCount} הצליחו, ${errorCount} נכשלו`,
+          variant: 'destructive',
+        });
+      }
+    } catch (error: any) {
+      setMigrationStatuses(prev => ({
+        ...prev,
+        [migrationName]: { name: migrationName, status: 'error', error: error.message }
+      }));
+      toast({
+        title: '❌ שגיאה בהרצת מיגרציה',
+        description: error.message,
+        variant: 'destructive',
+      });
+    }
   };
 
   // File upload handlers
@@ -817,6 +903,20 @@ serve(async (req) => {
                             )}
                           </div>
                           <div className="flex gap-1 flex-shrink-0">
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              className="h-6 w-6 p-0 text-green-600 hover:text-green-700 hover:bg-green-100"
+                              onClick={() => runMigrationFromGitHub(migration.name)}
+                              disabled={status?.status === 'running'}
+                              title="הרץ מיגרציה"
+                            >
+                              {status?.status === 'running' ? (
+                                <Loader2 className="h-3 w-3 animate-spin" />
+                              ) : (
+                                <Play className="h-3 w-3" />
+                              )}
+                            </Button>
                             <Button
                               size="sm"
                               variant="ghost"
