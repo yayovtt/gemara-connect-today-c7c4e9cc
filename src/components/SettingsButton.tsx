@@ -79,6 +79,11 @@ export function SettingsButton() {
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
   const [uploadedContent, setUploadedContent] = useState<string>('');
   const [isDragging, setIsDragging] = useState(false);
+  
+  // Manual SQL execution state
+  const [manualSql, setManualSql] = useState<string>('');
+  const [isRunningManualSql, setIsRunningManualSql] = useState(false);
+  const [manualSqlResult, setManualSqlResult] = useState<{ success: boolean; message: string } | null>(null);
 
   const handleColorChange = (key: keyof CustomColors, value: string) => {
     setLocalColors(prev => ({ ...prev, [key]: value }));
@@ -329,6 +334,143 @@ export function SettingsButton() {
 
   const handleDragLeave = () => {
     setIsDragging(false);
+  };
+
+  // Manual SQL execution with detailed debugging
+  const runManualSql = async () => {
+    if (!manualSql.trim()) {
+      toast({
+        title: '⚠️ אין SQL',
+        description: 'יש להדביק קוד SQL להרצה',
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    setIsRunningManualSql(true);
+    setManualSqlResult(null);
+    
+    console.log('═══════════════════════════════════════════════════════════════');
+    console.log('🔧 [Manual SQL] === STARTING MANUAL SQL EXECUTION ===' );
+    console.log('═══════════════════════════════════════════════════════════════');
+    console.log('📝 [Manual SQL] Full SQL content:');
+    console.log(manualSql);
+    console.log('📏 [Manual SQL] Content length:', manualSql.length, 'bytes');
+    
+    try {
+      // First, test if exec_sql exists
+      console.log('');
+      console.log('🔍 [Manual SQL] Testing exec_sql function...');
+      const { data: testData, error: testError } = await supabase.rpc('exec_sql', { sql_text: 'SELECT current_timestamp;' });
+      
+      if (testError) {
+        console.error('❌ [Manual SQL] exec_sql NOT FOUND!');
+        console.error('❌ [Manual SQL] Error code:', testError.code);
+        console.error('❌ [Manual SQL] Error message:', testError.message);
+        
+        if (testError.code === 'PGRST202') {
+          console.error('');
+          console.error('🚫 [Manual SQL] CAUSE: exec_sql function does not exist!');
+          console.error('💡 [Manual SQL] SOLUTION: Run this SQL in Supabase Dashboard:');
+          console.error('═══════════════════════════════════════════════════════════════');
+          console.error(`CREATE OR REPLACE FUNCTION exec_sql(sql_text TEXT)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+BEGIN
+  EXECUTE sql_text;
+  RETURN jsonb_build_object('success', true);
+EXCEPTION WHEN OTHERS THEN
+  RETURN jsonb_build_object('success', false, 'error', SQLERRM);
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION exec_sql(TEXT) TO anon;
+GRANT EXECUTE ON FUNCTION exec_sql(TEXT) TO authenticated;`);
+          console.error('═══════════════════════════════════════════════════════════════');
+          
+          setManualSqlResult({ success: false, message: 'פונקציית exec_sql לא קיימת! יש ליצור אותה קודם. לחץ F12 לפרטים' });
+          toast({
+            title: '❌ פונקציית exec_sql לא קיימת!',
+            description: 'לחץ F12 > Console לראות איך ליצור אותה',
+            variant: 'destructive',
+          });
+          setIsRunningManualSql(false);
+          return;
+        }
+        throw new Error(`exec_sql test failed: ${testError.message}`);
+      }
+      
+      console.log('✅ [Manual SQL] exec_sql exists and working!');
+      console.log('');
+      
+      // Split SQL into statements
+      const statements = manualSql
+        .split(/;\s*$/m)
+        .map(s => s.trim())
+        .filter(s => s.length > 0 && !s.startsWith('--'));
+      
+      console.log('📋 [Manual SQL] Parsed statements:', statements.length);
+      statements.forEach((s, i) => {
+        console.log(`   Statement ${i + 1}: ${s.substring(0, 80)}...`);
+      });
+      console.log('');
+      
+      let successCount = 0;
+      let errorCount = 0;
+      const errors: string[] = [];
+      
+      for (let i = 0; i < statements.length; i++) {
+        const statement = statements[i];
+        console.log(`⚡ [Manual SQL] Running statement ${i + 1}/${statements.length}:`);
+        console.log(`   ${statement.substring(0, 150)}${statement.length > 150 ? '...' : ''}`);
+        
+        const { data, error } = await supabase.rpc('exec_sql', { sql_text: statement + ';' });
+        
+        if (error) {
+          console.error(`❌ [Manual SQL] Statement ${i + 1} FAILED:`);
+          console.error(`   Error: ${error.message}`);
+          errorCount++;
+          errors.push(`${i + 1}: ${error.message}`);
+        } else {
+          console.log(`✅ [Manual SQL] Statement ${i + 1} SUCCESS`);
+          successCount++;
+        }
+        console.log('');
+      }
+      
+      console.log('═══════════════════════════════════════════════════════════════');
+      console.log('📊 [Manual SQL] === EXECUTION COMPLETE ===');
+      console.log(`   ✅ Successful: ${successCount}`);
+      console.log(`   ❌ Failed: ${errorCount}`);
+      console.log('═══════════════════════════════════════════════════════════════');
+      
+      if (errorCount === 0) {
+        setManualSqlResult({ success: true, message: `${successCount} פקודות בוצעו בהצלחה!` });
+        toast({
+          title: '✅ SQL הורץ בהצלחה!',
+          description: `${successCount} פקודות בוצעו`,
+        });
+      } else {
+        setManualSqlResult({ success: false, message: `${successCount} הצליחו, ${errorCount} נכשלו. בדוק Console` });
+        toast({
+          title: '⚠️ SQL הושלם עם שגיאות',
+          description: `${errorCount} פקודות נכשלו. בדוק Console (F12)`,
+          variant: 'destructive',
+        });
+      }
+    } catch (error: any) {
+      console.error('💥 [Manual SQL] Critical error:', error);
+      setManualSqlResult({ success: false, message: error.message });
+      toast({
+        title: '❌ שגיאה',
+        description: error.message,
+        variant: 'destructive',
+      });
+    }
+    
+    setIsRunningManualSql(false);
   };
 
   const runUploadedMigration = async () => {
@@ -697,6 +839,90 @@ serve(async (req) => {
                     תבנית TS
                   </Button>
                 </div>
+              </div>
+
+              {/* Manual SQL Execution */}
+              <div className="space-y-2 p-3 border-2 border-accent/30 rounded-lg bg-accent/5">
+                <Label className="text-xs font-medium flex items-center gap-1 text-accent">
+                  <Play className="h-3 w-3" />
+                  הרצת SQL ישירות על Supabase
+                </Label>
+                <textarea
+                  placeholder="הדבק כאן קוד SQL להרצה ישירות...&#10;&#10;לדוגמה:&#10;CREATE TABLE test (id SERIAL PRIMARY KEY);&#10;SELECT * FROM test;"
+                  value={manualSql}
+                  onChange={(e) => setManualSql(e.target.value)}
+                  className="w-full h-32 text-xs p-2 rounded border border-border bg-background font-mono resize-none"
+                  dir="ltr"
+                />
+                <div className="flex gap-1 flex-wrap">
+                  <Button 
+                    size="sm" 
+                    variant="default"
+                    className="flex-1 text-xs h-8 gap-1 min-w-[100px]"
+                    onClick={runManualSql}
+                    disabled={isRunningManualSql || !manualSql.trim()}
+                  >
+                    {isRunningManualSql ? (
+                      <>
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                        מריץ...
+                      </>
+                    ) : (
+                      <>
+                        <Play className="h-3 w-3" />
+                        הרץ SQL
+                      </>
+                    )}
+                  </Button>
+                  <Button 
+                    size="sm" 
+                    variant="outline" 
+                    className="text-xs h-8 gap-1"
+                    onClick={() => {
+                      setManualSql('');
+                      setManualSqlResult(null);
+                    }}
+                  >
+                    נקה
+                  </Button>
+                  <Button 
+                    size="sm" 
+                    variant="outline" 
+                    className="text-xs h-8 gap-1"
+                    onClick={() => {
+                      const execSqlCode = `CREATE OR REPLACE FUNCTION exec_sql(sql_text TEXT)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+BEGIN
+  EXECUTE sql_text;
+  RETURN jsonb_build_object('success', true);
+EXCEPTION WHEN OTHERS THEN
+  RETURN jsonb_build_object('success', false, 'error', SQLERRM);
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION exec_sql(TEXT) TO anon;
+GRANT EXECUTE ON FUNCTION exec_sql(TEXT) TO authenticated;`;
+                      setManualSql(execSqlCode);
+                      toast({ title: '📋 הודבק!', description: 'קוד יצירת exec_sql - עכשיו לחץ "הרץ SQL"' });
+                    }}
+                  >
+                    📋 הכנס exec_sql
+                  </Button>
+                </div>
+                {manualSqlResult && (
+                  <div className={cn(
+                    "text-xs p-2 rounded",
+                    manualSqlResult.success ? "bg-green-500/10 text-green-700 dark:text-green-300" : "bg-red-500/10 text-red-700 dark:text-red-300"
+                  )}>
+                    {manualSqlResult.success ? '✅' : '❌'} {manualSqlResult.message}
+                  </div>
+                )}
+                <p className="text-[10px] text-muted-foreground">
+                  💡 לחץ F12 &gt; Console לראות דיבאגים מפורטים
+                </p>
               </div>
 
               {/* Quick Commands */}
