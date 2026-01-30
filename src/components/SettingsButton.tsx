@@ -229,12 +229,19 @@ export function SettingsButton() {
 
     try {
       // Fetch migration content from GitHub
+      console.log('🚀 [Migration] Starting:', migrationName);
+      console.log('🔗 [Migration] Fetching from:', `${GITHUB_RAW_BASE}/${migrationName}`);
+      
       const response = await fetch(`${GITHUB_RAW_BASE}/${migrationName}`);
+      console.log('📥 [Migration] Fetch response status:', response.status, response.statusText);
+      
       if (!response.ok) {
-        throw new Error(`לא נמצא קובץ: ${migrationName}`);
+        throw new Error(`לא נמצא קובץ: ${migrationName} (HTTP ${response.status})`);
       }
       
       const sqlContent = await response.text();
+      console.log('📄 [Migration] SQL content length:', sqlContent.length, 'bytes');
+      console.log('📄 [Migration] First 200 chars:', sqlContent.substring(0, 200));
       
       // Split SQL into statements
       const statements = sqlContent
@@ -242,21 +249,34 @@ export function SettingsButton() {
         .map(s => s.trim())
         .filter(s => s.length > 0 && !s.startsWith('--'));
 
+      console.log('📋 [Migration] Total statements:', statements.length);
+
       let successCount = 0;
       let errorCount = 0;
       let lastError = '';
+      const errors: string[] = [];
 
-      for (const statement of statements) {
+      for (let i = 0; i < statements.length; i++) {
+        const statement = statements[i];
+        console.log(`⚡ [Migration] Running statement ${i + 1}/${statements.length}:`, statement.substring(0, 100) + '...');
+        
         const { data, error } = await supabase.rpc('exec_sql', { sql_text: statement + ';' });
         
+        console.log(`📊 [Migration] Statement ${i + 1} result:`, { data, error });
+        
         if (error) {
-          console.error('SQL Error:', error);
+          console.error(`❌ [Migration] Statement ${i + 1} FAILED:`, error);
+          console.error(`❌ [Migration] Failed SQL:`, statement);
           errorCount++;
           lastError = error.message;
+          errors.push(`Statement ${i + 1}: ${error.message}`);
         } else {
+          console.log(`✅ [Migration] Statement ${i + 1} SUCCESS`);
           successCount++;
         }
       }
+
+      console.log('📈 [Migration] Final results:', { successCount, errorCount, errors });
 
       if (errorCount === 0) {
         setMigrationStatuses(prev => ({
@@ -270,22 +290,23 @@ export function SettingsButton() {
       } else {
         setMigrationStatuses(prev => ({
           ...prev,
-          [migrationName]: { name: migrationName, status: 'error', error: lastError }
+          [migrationName]: { name: migrationName, status: 'error', error: `${errorCount} שגיאות: ${lastError}` }
         }));
         toast({
           title: '⚠️ מיגרציה הושלמה עם שגיאות',
-          description: `${successCount} הצליחו, ${errorCount} נכשלו`,
+          description: `${successCount} הצליחו, ${errorCount} נכשלו. בדוק Console (F12)`,
           variant: 'destructive',
         });
       }
     } catch (error: any) {
+      console.error('💥 [Migration] Critical error:', error);
       setMigrationStatuses(prev => ({
         ...prev,
         [migrationName]: { name: migrationName, status: 'error', error: error.message }
       }));
       toast({
         title: '❌ שגיאה בהרצת מיגרציה',
-        description: error.message,
+        description: `${error.message} - בדוק Console (F12)`,
         variant: 'destructive',
       });
     }
@@ -342,6 +363,8 @@ export function SettingsButton() {
     }
 
     setIsRunningMigration(true);
+    console.log('🚀 [Upload Migration] Starting:', uploadedFile.name);
+    console.log('📄 [Upload Migration] Content length:', uploadedContent.length, 'bytes');
     
     try {
       // Split SQL into statements
@@ -350,19 +373,33 @@ export function SettingsButton() {
         .map(s => s.trim())
         .filter(s => s.length > 0 && !s.startsWith('--'));
 
+      console.log('📋 [Upload Migration] Total statements:', statements.length);
+      console.log('📋 [Upload Migration] Statements preview:', statements.slice(0, 3).map(s => s.substring(0, 50) + '...'));
+
       let successCount = 0;
       let errorCount = 0;
+      const errors: string[] = [];
 
-      for (const statement of statements) {
+      for (let i = 0; i < statements.length; i++) {
+        const statement = statements[i];
+        console.log(`⚡ [Upload Migration] Running statement ${i + 1}/${statements.length}:`, statement.substring(0, 100) + '...');
+        
         const { data, error } = await supabase.rpc('exec_sql', { sql_text: statement + ';' });
         
+        console.log(`📊 [Upload Migration] Statement ${i + 1} result:`, { data, error });
+        
         if (error) {
-          console.error('SQL Error:', error);
+          console.error(`❌ [Upload Migration] Statement ${i + 1} FAILED:`, error);
+          console.error(`❌ [Upload Migration] Failed SQL:`, statement);
           errorCount++;
+          errors.push(`Statement ${i + 1}: ${error.message}`);
         } else {
+          console.log(`✅ [Upload Migration] Statement ${i + 1} SUCCESS`);
           successCount++;
         }
       }
+
+      console.log('📈 [Upload Migration] Final results:', { successCount, errorCount, errors });
 
       if (errorCount === 0) {
         toast({
@@ -374,7 +411,7 @@ export function SettingsButton() {
       } else {
         toast({
           title: '⚠️ מיגרציה הושלמה עם שגיאות',
-          description: `${successCount} הצליחו, ${errorCount} נכשלו`,
+          description: `${successCount} הצליחו, ${errorCount} נכשלו. בדוק Console (F12)`,
           variant: 'destructive',
         });
       }
