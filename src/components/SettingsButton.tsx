@@ -118,21 +118,19 @@ export function SettingsButton() {
     }));
 
     try {
-      // Split SQL into statements
-      const statements = sqlContent
-        .split(';')
-        .map(s => s.trim())
-        .filter(s => s.length > 0 && !s.startsWith('--'));
+      // Use execute_safe_migration function
+      const { data, error } = await supabase.rpc('execute_safe_migration', { 
+        p_name: migrationName, 
+        p_sql: sqlContent 
+      });
 
-      for (const statement of statements) {
-        const { error } = await supabase.rpc('exec_sql', { sql_text: statement + ';' });
-        if (error) {
-          // Try direct query as fallback
-          const { error: directError } = await supabase.from('_exec').select().limit(0);
-          if (directError) {
-            throw new Error(`Failed to execute: ${statement.substring(0, 100)}...`);
-          }
-        }
+      if (error) {
+        throw new Error(error.message);
+      }
+
+      const result = data as { success: boolean; error?: string };
+      if (!result.success) {
+        throw new Error(result.error || 'Unknown error');
       }
 
       setMigrationStatuses(prev => ({
@@ -241,27 +239,20 @@ export function SettingsButton() {
       
       const sqlContent = await response.text();
       
-      // Split SQL into statements
-      const statements = sqlContent
-        .split(/;\s*$/m)
-        .map(s => s.trim())
-        .filter(s => s.length > 0 && !s.startsWith('--'));
+      // Use execute_safe_migration function
+      const { data, error } = await supabase.rpc('execute_safe_migration', { 
+        p_name: migrationName, 
+        p_sql: sqlContent 
+      });
 
-      let successCount = 0;
-      let errorCount = 0;
-      let lastError = '';
-
-      for (const statement of statements) {
-        const { data, error } = await supabase.rpc('exec_sql', { sql_text: statement + ';' });
-        
-        if (error) {
-          console.error('SQL Error:', error);
-          errorCount++;
-          lastError = error.message;
-        } else {
-          successCount++;
-        }
+      if (error) {
+        throw new Error(error.message);
       }
+
+      const result = data as { success: boolean; error?: string };
+      const successCount = result.success ? 1 : 0;
+      const errorCount = result.success ? 0 : 1;
+      const lastError = result.error || '';
 
       if (errorCount === 0) {
         setMigrationStatuses(prev => ({
@@ -358,93 +349,35 @@ export function SettingsButton() {
     console.log('📏 [Manual SQL] Content length:', manualSql.length, 'bytes');
     
     try {
-      // First, test if exec_sql exists
+      // Use execute_safe_migration function
       console.log('');
-      console.log('🔍 [Manual SQL] Testing exec_sql function...');
-      const { data: testData, error: testError } = await supabase.rpc('exec_sql', { sql_text: 'SELECT current_timestamp;' });
+      console.log('🔍 [Manual SQL] Using execute_safe_migration function...');
       
-      if (testError) {
-        console.error('❌ [Manual SQL] exec_sql NOT FOUND!');
-        console.error('❌ [Manual SQL] Error code:', testError.code);
-        console.error('❌ [Manual SQL] Error message:', testError.message);
-        
-        if (testError.code === 'PGRST202') {
-          console.error('');
-          console.error('🚫 [Manual SQL] CAUSE: exec_sql function does not exist!');
-          console.error('💡 [Manual SQL] SOLUTION: Run this SQL in Supabase Dashboard:');
-          console.error('═══════════════════════════════════════════════════════════════');
-          console.error(`CREATE OR REPLACE FUNCTION exec_sql(sql_text TEXT)
-RETURNS JSONB
-LANGUAGE plpgsql
-SECURITY DEFINER
-AS $$
-BEGIN
-  EXECUTE sql_text;
-  RETURN jsonb_build_object('success', true);
-EXCEPTION WHEN OTHERS THEN
-  RETURN jsonb_build_object('success', false, 'error', SQLERRM);
-END;
-$$;
-
-GRANT EXECUTE ON FUNCTION exec_sql(TEXT) TO anon;
-GRANT EXECUTE ON FUNCTION exec_sql(TEXT) TO authenticated;`);
-          console.error('═══════════════════════════════════════════════════════════════');
-          
-          setManualSqlResult({ success: false, message: 'פונקציית exec_sql לא קיימת! יש ליצור אותה קודם. לחץ F12 לפרטים' });
-          toast({
-            title: '❌ פונקציית exec_sql לא קיימת!',
-            description: 'לחץ F12 > Console לראות איך ליצור אותה',
-            variant: 'destructive',
-          });
-          setIsRunningManualSql(false);
-          return;
-        }
-        throw new Error(`exec_sql test failed: ${testError.message}`);
-      }
-      
-      console.log('✅ [Manual SQL] exec_sql exists and working!');
-      console.log('');
-      
-      // Split SQL into statements
-      const statements = manualSql
-        .split(/;\s*$/m)
-        .map(s => s.trim())
-        .filter(s => s.length > 0 && !s.startsWith('--'));
-      
-      console.log('📋 [Manual SQL] Parsed statements:', statements.length);
-      statements.forEach((s, i) => {
-        console.log(`   Statement ${i + 1}: ${s.substring(0, 80)}...`);
+      const { data, error } = await supabase.rpc('execute_safe_migration', { 
+        p_name: 'manual_sql_' + Date.now(), 
+        p_sql: manualSql 
       });
-      console.log('');
       
-      let successCount = 0;
-      let errorCount = 0;
-      const errors: string[] = [];
-      
-      for (let i = 0; i < statements.length; i++) {
-        const statement = statements[i];
-        console.log(`⚡ [Manual SQL] Running statement ${i + 1}/${statements.length}:`);
-        console.log(`   ${statement.substring(0, 150)}${statement.length > 150 ? '...' : ''}`);
-        
-        const { data, error } = await supabase.rpc('exec_sql', { sql_text: statement + ';' });
-        
-        if (error) {
-          console.error(`❌ [Manual SQL] Statement ${i + 1} FAILED:`);
-          console.error(`   Error: ${error.message}`);
-          errorCount++;
-          errors.push(`${i + 1}: ${error.message}`);
-        } else {
-          console.log(`✅ [Manual SQL] Statement ${i + 1} SUCCESS`);
-          successCount++;
-        }
-        console.log('');
+      if (error) {
+        console.error('❌ [Manual SQL] Migration failed:', error.message);
+        throw new Error(error.message);
       }
+      
+      const result = data as { success: boolean; error?: string };
       
       console.log('═══════════════════════════════════════════════════════════════');
       console.log('📊 [Manual SQL] === EXECUTION COMPLETE ===');
-      console.log(`   ✅ Successful: ${successCount}`);
-      console.log(`   ❌ Failed: ${errorCount}`);
+      console.log(`   Result: ${result.success ? '✅ Success' : '❌ Failed'}`);
+      if (result.error) console.log(`   Error: ${result.error}`);
       console.log('═══════════════════════════════════════════════════════════════');
+      
+      const successCount = result.success ? 1 : 0;
+      const errorCount = result.success ? 0 : 1;
+      const errors: string[] = result.error ? [result.error] : [];
+      
+      console.log('═══════════════════════════════════════════════════════════════');
+      console.log('📊 [Manual SQL] === FINAL RESULT ===');
+      console.log(`   Success: ${successCount}, Failed: ${errorCount}`);
       
       if (errorCount === 0) {
         setManualSqlResult({ success: true, message: `${successCount} פקודות בוצעו בהצלחה!` });
@@ -486,37 +419,29 @@ GRANT EXECUTE ON FUNCTION exec_sql(TEXT) TO authenticated;`);
     setIsRunningMigration(true);
     
     try {
-      // Split SQL into statements
-      const statements = uploadedContent
-        .split(/;\s*$/m)
-        .map(s => s.trim())
-        .filter(s => s.length > 0 && !s.startsWith('--'));
+      // Use execute_safe_migration function
+      const { data, error } = await supabase.rpc('execute_safe_migration', { 
+        p_name: uploadedFile.name, 
+        p_sql: uploadedContent 
+      });
 
-      let successCount = 0;
-      let errorCount = 0;
-
-      for (const statement of statements) {
-        const { data, error } = await supabase.rpc('exec_sql', { sql_text: statement + ';' });
-        
-        if (error) {
-          console.error('SQL Error:', error);
-          errorCount++;
-        } else {
-          successCount++;
-        }
+      if (error) {
+        throw new Error(error.message);
       }
 
-      if (errorCount === 0) {
+      const result = data as { success: boolean; error?: string };
+
+      if (result.success) {
         toast({
           title: '✅ מיגרציה הורצה בהצלחה!',
-          description: `${successCount} פקודות SQL בוצעו`,
+          description: `הקובץ ${uploadedFile.name} בוצע`,
         });
         setUploadedFile(null);
         setUploadedContent('');
       } else {
         toast({
-          title: '⚠️ מיגרציה הושלמה עם שגיאות',
-          description: `${successCount} הצליחו, ${errorCount} נכשלו`,
+          title: '⚠️ מיגרציה נכשלה',
+          description: result.error || 'שגיאה לא ידועה',
           variant: 'destructive',
         });
       }

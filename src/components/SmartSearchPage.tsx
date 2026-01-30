@@ -99,10 +99,10 @@ interface PsakDin {
   year: number;
   case_number: string | null;
   summary: string;
-  full_text: string | null;
-  tags: string[] | null;
-  source_url: string | null;
-  created_at: string;
+  full_text?: string | null;
+  tags?: string[] | null;
+  source_url?: string | null;
+  created_at?: string;
 }
 
 // Types
@@ -1248,36 +1248,29 @@ export function SmartSearchPage() {
         searchPattern = searchPattern ? `(${searchPattern})|(${listPattern})` : listPattern;
       }
       
-      // Use RPC function for server-side regex search
-      const { data, error } = await supabase.rpc('search_psakei_din_advanced', {
-        search_pattern: searchPattern,
-        search_text: searchText,
-        result_limit: limit
-      });
+      // Fallback to regular ILIKE query instead of RPC
+      const { data, error } = await supabase
+        .from('psakei_din')
+        .select('id, title, court, year, case_number, summary, created_at')
+        .or(`title.ilike.%${searchText}%,summary.ilike.%${searchText}%`)
+        .limit(limit);
       
       if (error) {
-        console.error('RPC search error:', error);
-        // Fallback to regular query
-        const { data: fallbackData, error: fallbackError } = await supabase
-          .from('psakei_din')
-          .select('id, title, court, year, case_number, summary, created_at')
-          .limit(limit);
-        
-        if (fallbackError) throw fallbackError;
-        return (fallbackData as PsakDin[]) || [];
+        console.error('Search error:', error);
+        return [];
       }
       
-      // Map RPC results to PsakDin format
-      return (data || []).map((item: { id: string; title: string; court: string; year: number; case_number: string; summary: string; matched_text?: string; match_count?: number }) => ({
+      return (data || []).map((item) => ({
         id: item.id,
         title: item.title,
         court: item.court,
         year: item.year,
         case_number: item.case_number,
         summary: item.summary,
-        // Add matched info for highlighting
-        _matchedText: item.matched_text,
-        _matchCount: item.match_count
+        full_text: null,
+        tags: null,
+        source_url: null,
+        created_at: item.created_at,
       })) as PsakDin[];
       
     } catch (error) {

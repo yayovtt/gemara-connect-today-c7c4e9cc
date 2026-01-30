@@ -1,13 +1,16 @@
 import { useState, useEffect, useCallback } from 'react';
-import { SearchCondition } from '@/types/search';
+import { SearchCondition, FilterRules } from '@/types/search';
 
 export interface SearchHistoryItem {
   id: string;
-  timestamp: number;
+  timestamp: number | Date;
   text: string;
   conditions: SearchCondition[];
   resultsCount: number;
   matchedTerms: string[];
+  query?: string;
+  filterRules?: FilterRules;
+  resultCount?: number;
 }
 
 const STORAGE_KEYS = {
@@ -67,23 +70,9 @@ export function useLocalStorage() {
     }
   }, []);
 
-  const addToHistory = useCallback((
-    text: string,
-    conditions: SearchCondition[],
-    resultsCount: number,
-    matchedTerms: string[]
-  ) => {
-    const newItem: SearchHistoryItem = {
-      id: crypto.randomUUID(),
-      timestamp: Date.now(),
-      text: text.substring(0, 500),
-      conditions,
-      resultsCount,
-      matchedTerms: [...new Set(matchedTerms)].slice(0, 10),
-    };
-
+  const addToHistory = useCallback((item: SearchHistoryItem) => {
     setHistory(prev => {
-      const updated = [newItem, ...prev].slice(0, MAX_HISTORY_ITEMS);
+      const updated = [item, ...prev].slice(0, MAX_HISTORY_ITEMS);
       try {
         localStorage.setItem(STORAGE_KEYS.HISTORY, JSON.stringify(updated));
       } catch (e) {
@@ -114,14 +103,21 @@ export function useLocalStorage() {
     }
   }, []);
 
+  const removeFromHistory = deleteHistoryItem;
+
   return {
     history,
+    searchHistory: history,
     saveText,
     loadText,
     saveConditions,
     loadConditions,
     addToHistory,
     deleteHistoryItem,
+    removeFromHistory,
     clearHistory,
   };
 }
+
+// Alias for backward compatibility
+export const useLocalStorageSearch = useLocalStorage;
