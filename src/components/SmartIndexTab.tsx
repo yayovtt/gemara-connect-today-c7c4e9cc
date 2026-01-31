@@ -41,6 +41,7 @@ import {
 import PsakDinViewDialog from "./PsakDinViewDialog";
 import { toHebrewNumeral } from "@/lib/hebrewNumbers";
 import { MASECHTOT } from "@/lib/masechtotData";
+import BatchAnalysisPanel from "./BatchAnalysisPanel";
 
 const BATCH_SIZE = 500;
 const STORAGE_KEY = 'smart_index_last_run';
@@ -579,6 +580,9 @@ const SmartIndexTab = () => {
             </CardContent>
           </Card>
         )}
+
+        {/* Batch AI Analysis Panel */}
+        <BatchAnalysisPanel />
 
         {/* Summary Stats */}
         {analysisResults.length > 0 && (
